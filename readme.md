@@ -5,7 +5,8 @@ FFmpeg software decoder. It replaces the pixel-domain detection pass, then
 leaves smoothing, zoom, interpolation, and rendering to FFmpeg's
 `vidstabtransform` filter.
 
-The current implementation is the translation-only V0 described in
+The current implementation is the translation-only V0 summarized in
+[`design.md`](design.md). The original engineering specification remains in
 `mvstab_ffmpeg_codec_motion_vector_design.md`. It supports:
 
 - `inspect` for codec and motion-vector availability statistics;
@@ -17,11 +18,14 @@ The current implementation is the translation-only V0 described in
 
 ## Build
 
-Install CMake, a C11 compiler, `pkg-config`, and development packages for:
+Install CMake, a C11 compiler, and development packages for:
 
 - `libavformat`
 - `libavcodec`
 - `libavutil`
+
+`pkg-config` is recommended when the FFmpeg packages provide metadata. If it is
+unavailable, CMake falls back to native header and library discovery.
 
 Then build and test:
 
