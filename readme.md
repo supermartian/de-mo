@@ -207,15 +207,16 @@ On the same host:
 - after rendering each transform and measuring the remaining motion with the
   same no-smoothing vid.stab pass, the earlier per-frame mvstab estimator
   reduced median translation from 4.892 to 4.572 pixels; the exact-reference
-  pose graph reaches 3.163 pixels and lowers median rotation from 0.00421 to
-  0.00287 radians; vid.stab's pixel-domain result reaches 2.283 pixels and
-  0.00379 radians.
+  pose graph without detector-side acceleration smoothing reaches 2.368 pixels
+  (6.806 RMS) and lowers median rotation from 0.00421 to 0.00263 radians;
+  vid.stab's pixel-domain result reaches 2.283 pixels (5.651 RMS) and 0.00379
+  radians.
 
 The last comparison is intentionally candid: exact bitstream timing makes the
 codec estimator useful and much cheaper. Preserving multi-reference constraints
-closes much of the remaining gap, although it still does not match vid.stab's
-translation quality on this clip. Encoder decisions are a sparse proxy for
-camera motion, not optical-flow ground truth.
+gets typical translation close to vid.stab and improves median rotation, though
+vid.stab retains a translation-RMS advantage on this clip. Encoder decisions
+are a sparse proxy for camera motion, not optical-flow ground truth.
 
 ## Supported codecs
 

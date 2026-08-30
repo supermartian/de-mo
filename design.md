@@ -36,7 +36,6 @@ robust spatially balanced similarity fit per reference edge
 confidence-weighted pose graph
   - exact reference constraints
   - independently anchored reference components
-  - weak acceleration regularization
         |
         v
 relative old-format vid.stab transforms
@@ -286,9 +285,9 @@ pose[i] - pose[r] ~= edge[r -> i]
 
 The four pose coordinates are translation X/Y, rotation, and fractional scale
 under a small-motion approximation. A sparse least-squares solve weights every
-edge by its fit confidence and spatial coverage. A weak second-difference penalty
-reduces trajectory noise without replacing the later vid.stab stabilization
-smoothing. Reference-connected components are solved and anchored separately,
+edge by its fit confidence and spatial coverage. The detector does not apply a
+second temporal smoothing objective: `vidstabtransform` owns that policy during
+rendering. Reference-connected components are solved and anchored separately,
 so the optimizer cannot pull one GOP or scene through an unrelated component.
 Adjacent pose differences become the relative output rows.
 
@@ -354,11 +353,12 @@ motion on only 7 frames; the exact-timed implementation produced nonzero
 measurements on 11,088 frames, with 7,931 passing confidence before bounded-gap
 repair. The earlier per-frame exact estimator reduced median residual
 translation from 4.892 to 4.572 pixels. Keeping exact reference edges and
-solving the pose graph reduces it further to 3.163 pixels; median residual
-rotation falls from 0.00421 in the original to 0.00287 radians. The
-pixel-domain vid.stab result reached 2.283 pixels and 0.00379 radians. The graph
-therefore closes much of the remaining translation gap and improves rotation,
-while pixel-domain vid.stab still leads on translation for this sequence.
+solving the pose graph without detector-side acceleration smoothing reduces it
+further to 2.368 pixels (6.806 RMS); median residual rotation falls from
+0.00421 in the original to 0.00263 radians. The pixel-domain vid.stab result
+reached 2.283 pixels (5.651 RMS) and 0.00379 radians. The graph is therefore
+close on typical translation and better on median rotation, while pixel-domain
+vid.stab still leads on translation RMS for this sequence.
 
 ## Known boundaries and next work
 

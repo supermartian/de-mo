@@ -188,25 +188,6 @@ static int build_graph(
     return graph->edge_count > 0;
 }
 
-static void add_acceleration_product(
-    const PoseGraph *graph,
-    const double *input,
-    double *output
-) {
-    const double weight = 0.01;
-    for (size_t index = 2; index < graph->frame_count; ++index) {
-        double difference;
-        if (graph->component[index] != graph->component[index - 1] ||
-            graph->component[index] != graph->component[index - 2]) {
-            continue;
-        }
-        difference = input[index] - 2.0 * input[index - 1] + input[index - 2];
-        output[index] += weight * difference;
-        output[index - 1] -= 2.0 * weight * difference;
-        output[index - 2] += weight * difference;
-    }
-}
-
 static void graph_product(
     const PoseGraph *graph,
     const double *input,
@@ -219,7 +200,6 @@ static void graph_product(
         output[edge->current] += edge->weight * difference;
         output[edge->reference] -= edge->weight * difference;
     }
-    add_acceleration_product(graph, input, output);
     for (size_t index = 0; index < graph->frame_count; ++index) {
         if (graph->anchor[index]) {
             output[index] += input[index];

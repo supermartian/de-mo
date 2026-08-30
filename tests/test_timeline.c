@@ -321,6 +321,26 @@ static int test_pose_graph_does_not_bridge_components(void) {
     return 0;
 }
 
+static int test_pose_graph_does_not_smooth_edge_acceleration(void) {
+    MvstabTimelineFrame frames[3];
+    MvstabMotionEdge edges[2];
+    for (int index = 0; index < 3; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_P, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+    }
+    set_edge(&edges[0], 0, 0.0);
+    set_edge(&edges[1], 1, 10.0);
+    frames[1].edges = &edges[0];
+    frames[1].edge_count = 1;
+    frames[2].edges = &edges[1];
+    frames[2].edge_count = 1;
+    mvstab_build_timeline(frames, 3, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx) < 1e-7);
+    CHECK(fabs(frames[2].output.dx - 10.0) < 1e-7);
+    return 0;
+}
+
 static int test_pose_graph_weights_confident_edges(void) {
     MvstabTimelineFrame frames[2];
     MvstabMotionEdge edges[2];
@@ -412,6 +432,7 @@ int main(void) {
     }
     return test_pose_graph_recovers_adjacent_motion() != 0 ||
            test_pose_graph_does_not_bridge_components() != 0 ||
+           test_pose_graph_does_not_smooth_edge_acceleration() != 0 ||
            test_pose_graph_weights_confident_edges() != 0 ||
            test_pose_graph_preserves_disconnected_measurement() != 0 ||
            test_pose_graph_defers_to_legacy_timeline() != 0;
