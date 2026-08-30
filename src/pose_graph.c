@@ -225,23 +225,54 @@ static void build_rhs(const PoseGraph *graph, int dimension, double *rhs) {
     }
 }
 
+static void build_graph_diagonal(const PoseGraph *graph, double *diagonal) {
+    for (size_t index = 0; index < graph->frame_count; ++index) {
+        diagonal[index] = graph->anchor[index] ? 1.0 : 0.0;
+    }
+    for (size_t index = 0; index < graph->edge_count; ++index) {
+        const PoseEdge *edge = &graph->edges[index];
+        diagonal[edge->current] += edge->weight;
+        diagonal[edge->reference] += edge->weight;
+    }
+}
+
+static double apply_preconditioner(
+    const double *residual,
+    const double *diagonal,
+    double *preconditioned,
+    size_t count
+) {
+    for (size_t index = 0; index < count; ++index) {
+        preconditioned[index] = residual[index] / diagonal[index];
+    }
+    return vector_dot(residual, preconditioned, count);
+}
+
 static int solve_dimension(const PoseGraph *graph, int dimension, double *solution) {
     size_t count = graph->frame_count;
-    double *memory = calloc(count * 4, sizeof(*memory));
+    double *memory = calloc(count * 5, sizeof(*memory));
     double *residual;
     double *direction;
     double *product;
+    double *preconditioned;
+    double *diagonal;
     double residual_norm;
     double initial_norm;
+    double inner_product;
     double tolerance;
     if (memory == NULL) {
         return -1;
     }
-    residual = memory + count;
+    residual = memory;
     direction = residual + count;
     product = direction + count;
+    preconditioned = product + count;
+    diagonal = preconditioned + count;
     build_rhs(graph, dimension, residual);
-    memcpy(direction, residual, count * sizeof(*direction));
+    build_graph_diagonal(graph, diagonal);
+    inner_product = apply_preconditioner(
+        residual, diagonal, preconditioned, count);
+    memcpy(direction, preconditioned, count * sizeof(*direction));
     residual_norm = vector_dot(residual, residual, count);
     initial_norm = residual_norm;
     tolerance = fmax(1e-20, initial_norm * 1e-16);
@@ -249,23 +280,28 @@ static int solve_dimension(const PoseGraph *graph, int dimension, double *soluti
          residual_norm > tolerance; ++iteration) {
         double denominator;
         double next_norm;
+        double next_inner_product;
         graph_product(graph, direction, product);
         denominator = vector_dot(direction, product, count);
-        if (!isfinite(denominator) || denominator <= 0.0) {
+        if (!isfinite(denominator) || denominator <= 0.0 ||
+            !isfinite(inner_product) || inner_product <= 0.0) {
             free(memory);
             return -1;
         }
-        double alpha = residual_norm / denominator;
+        double alpha = inner_product / denominator;
         for (size_t index = 0; index < count; ++index) {
             solution[index] += alpha * direction[index];
             residual[index] -= alpha * product[index];
         }
         next_norm = vector_dot(residual, residual, count);
+        next_inner_product = apply_preconditioner(
+            residual, diagonal, preconditioned, count);
         for (size_t index = 0; index < count; ++index) {
-            direction[index] = residual[index] +
-                (next_norm / residual_norm) * direction[index];
+            direction[index] = preconditioned[index] +
+                (next_inner_product / inner_product) * direction[index];
         }
         residual_norm = next_norm;
+        inner_product = next_inner_product;
     }
     free(memory);
     return residual_norm <= tolerance ? 0 : -1;
@@ -320,7 +356,7 @@ int mvstab_build_pose_graph_timeline(
         free_graph(&graph);
         return result;
     }
-    if (frame_count > SIZE_MAX / 4) {
+    if (frame_count > SIZE_MAX / 5) {
         free_graph(&graph);
         return -1;
     }

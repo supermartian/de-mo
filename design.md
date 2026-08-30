@@ -287,9 +287,11 @@ The four pose coordinates are translation X/Y, rotation, and fractional scale
 under a small-motion approximation. A sparse least-squares solve weights every
 edge by its fit confidence and spatial coverage. The detector does not apply a
 second temporal smoothing objective: `vidstabtransform` owns that policy during
-rendering. Reference-connected components are solved and anchored separately,
-so the optimizer cannot pull one GOP or scene through an unrelated component.
-Adjacent pose differences become the relative output rows.
+rendering. A diagonal preconditioner keeps the graph solve stable when valid
+edge weights span several orders of magnitude. Reference-connected components
+are solved and anchored separately, so the optimizer cannot pull one GOP or
+scene through an unrelated component. Adjacent pose differences become the
+relative output rows.
 
 If exact edge metadata is absent, the previous timestamp-normalized timeline is
 used unchanged. Its gaps of at most three frames are interpolated only when

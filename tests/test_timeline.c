@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "mvstab/timeline.h"
@@ -359,6 +360,39 @@ static int test_pose_graph_weights_confident_edges(void) {
     return 0;
 }
 
+static int test_pose_graph_handles_varied_edge_weights(void) {
+    const int frame_count = 2501;
+    MvstabTimelineFrame *frames = calloc(frame_count, sizeof(*frames));
+    MvstabMotionEdge *edges = calloc(frame_count - 1, sizeof(*edges));
+    int correct;
+    if (frames == NULL || edges == NULL) {
+        free(frames);
+        free(edges);
+        return 1;
+    }
+    for (int index = 0; index < frame_count; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_P, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index == 0) {
+            continue;
+        }
+        set_edge(&edges[index - 1], 0, index);
+        edges[index - 1].motion.confidence =
+            1e-4 + (double)index / frame_count;
+        frames[index].edges = &edges[index - 1];
+        frames[index].edge_count = 1;
+    }
+    mvstab_build_timeline(frames, frame_count, MVSTAB_MODE_SAFE);
+    correct = fabs(frames[1].output.dx - 1.0) < 1e-6 &&
+              fabs(frames[frame_count / 2].output.dx - 1.0) < 1e-6 &&
+              fabs(frames[frame_count - 1].output.dx - 1.0) < 1e-6;
+    free(frames);
+    free(edges);
+    CHECK(correct);
+    return 0;
+}
+
 static int test_pose_graph_preserves_disconnected_measurement(void) {
     MvstabTimelineFrame frames[3];
     MvstabMotionEdge edge;
@@ -434,6 +468,7 @@ int main(void) {
            test_pose_graph_does_not_bridge_components() != 0 ||
            test_pose_graph_does_not_smooth_edge_acceleration() != 0 ||
            test_pose_graph_weights_confident_edges() != 0 ||
+           test_pose_graph_handles_varied_edge_weights() != 0 ||
            test_pose_graph_preserves_disconnected_measurement() != 0 ||
            test_pose_graph_defers_to_legacy_timeline() != 0;
 }

@@ -31,7 +31,7 @@ The repository includes:
   motion decoding;
 - exact reference-time normalization for P and B pictures;
 - robust, spatially balanced similarity fits per exact reference;
-- a confidence-weighted exact-reference pose graph;
+- a diagonally preconditioned, confidence-weighted exact-reference pose graph;
 - CSV/JSON diagnostics and vid.stab-compatible transforms;
 - comparison, plotting, unit, and encoded end-to-end tests.
 
