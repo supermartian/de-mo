@@ -1,0 +1,614 @@
+From de00c59525f6b493bcc9369fddf3b5fec5785cef Mon Sep 17 00:00:00 2001
+From: Yuzhong Wen <supermartian@gmail.com>
+Date: Sun, 30 Aug 2026 14:14:54 +0800
+Subject: [PATCH] avcodec/h264: export exact motion metadata without pixels
+
+---
+ libavcodec/h264_mvpred.h  | 121 +++++++++++++++++++++++++++++++++++-
+ libavcodec/h264_picture.c |   5 ++
+ libavcodec/h264_slice.c   |  31 +++++++---
+ libavcodec/h264dec.c      | 127 +++++++++++++++++++++++++++++++++++++-
+ libavcodec/h264dec.h      |  12 ++++
+ libavutil/motion_vector.h |  42 +++++++++++--
+ 6 files changed, 323 insertions(+), 15 deletions(-)
+
+diff --git a/libavcodec/h264_mvpred.h b/libavcodec/h264_mvpred.h
+index 1fa5487..39d6343 100644
+--- a/libavcodec/h264_mvpred.h
++++ b/libavcodec/h264_mvpred.h
+@@ -34,6 +34,7 @@
+ 
+ #include "libavutil/avassert.h"
+ #include "libavutil/mem_internal.h"
++#include "libavutil/motion_vector.h"
+ 
+ 
+ /**
+@@ -91,6 +92,113 @@ static av_always_inline void write_back_non_zero_count(const H264Context *h,
+     }
+ }
+ 
++static av_always_inline H264MotionReference motion_reference(
++    const H264Context *h, const H264SliceContext *sl, int list, int ref_index)
++{
++    H264MotionReference result = { 0 };
++    const H264Ref *reference;
++    int64_t poc_delta;
++    int current_poc = h->cur_pic_ptr->poc;
++
++    if (ref_index < 0 || ref_index >= sl->ref_count[list])
++        return result;
++
++    reference = &sl->ref_list[list][ref_index];
++    if (!reference->parent)
++        return result;
++
++    if (FIELD_PICTURE(h))
++        current_poc = h->cur_pic_ptr->field_poc[h->picture_structure == PICT_BOTTOM_FIELD];
++    else if (MB_FIELD(sl))
++        current_poc = h->cur_pic_ptr->field_poc[sl->mb_y & 1];
++
++    poc_delta = (int64_t)reference->poc - current_poc;
++    if (poc_delta < INT32_MIN || poc_delta > INT32_MAX)
++        return result;
++
++    result.poc_delta = poc_delta;
++    result.flags = ref_index & AV_MV_FLAG_REFERENCE_INDEX_MASK;
++    result.flags |= list ? AV_MV_FLAG_REFERENCE_LIST1 : 0;
++    result.flags |= reference->parent->long_ref ? AV_MV_FLAG_LONG_REFERENCE : 0;
++    result.flags |= reference->reference & PICT_TOP_FIELD ?
++                    AV_MV_FLAG_REFERENCE_TOP_FIELD : 0;
++    result.flags |= reference->reference & PICT_BOTTOM_FIELD ?
++                    AV_MV_FLAG_REFERENCE_BOTTOM_FIELD : 0;
++    result.flags |= AV_MV_FLAG_REFERENCE_EXACT;
++    if (h->cur_pic.f->pts != AV_NOPTS_VALUE &&
++        reference->parent->f->pts != AV_NOPTS_VALUE) {
++        result.pts_delta = av_sat_sub64(reference->parent->f->pts,
++                                        h->cur_pic.f->pts);
++        result.flags |= AV_MV_FLAG_PTS_DELTA_VALID;
++    }
++    return result;
++}
++
++static av_always_inline void write_back_motion_references(
++    const H264Context *h, H264SliceContext *sl, int list, int b8_xy,
++    int mb_type)
++{
++    H264MotionReference *references = &h->cur_pic.motion_ref[list][b8_xy];
++    const int8_t *cache = sl->ref_cache[list];
++
++    references[0] = motion_reference(h, sl, list, cache[scan8[0]]);
++    references[1] = motion_reference(h, sl, list, cache[scan8[4]]);
++    references[2] = motion_reference(h, sl, list, cache[scan8[8]]);
++    references[3] = motion_reference(h, sl, list, cache[scan8[12]]);
++    for (int i = 0; i < 4; i++) {
++        const int direct = IS_DIRECT(mb_type) ||
++                           (IS_8X8(mb_type) && IS_DIRECT(sl->sub_mb_type[i]));
++        references[i].flags |= direct ? AV_MV_FLAG_DIRECT : 0;
++        references[i].flags |= IS_SKIP(mb_type) ? AV_MV_FLAG_SKIP : 0;
++        references[i].flags |= IS_INTERLACED(mb_type) ?
++                               AV_MV_FLAG_INTERLACED : 0;
++    }
++}
++
++static av_always_inline void mark_motion_partition(uint8_t *partitions,
++                                                   int x, int y,
++                                                   int width, int height)
++{
++    partitions[4 * y + x] = (width << 4) | height;
++}
++
++static av_always_inline void write_back_motion_partitions(
++    const H264Context *h, const H264SliceContext *sl, int mb_type)
++{
++    uint8_t *partitions = &h->cur_pic.motion_partition[16 * sl->mb_xy];
++
++    memset(partitions, 0, 16);
++    if (IS_8X8(mb_type)) {
++        for (int i = 0; i < 4; i++) {
++            const int type = sl->sub_mb_type[i];
++            const int x = 2 * (i & 1);
++            const int y = 2 * (i >> 1);
++            if (IS_SUB_8X8(type)) {
++                mark_motion_partition(partitions, x, y, 2, 2);
++            } else if (IS_SUB_8X4(type)) {
++                mark_motion_partition(partitions, x, y, 2, 1);
++                mark_motion_partition(partitions, x, y + 1, 2, 1);
++            } else if (IS_SUB_4X8(type)) {
++                mark_motion_partition(partitions, x, y, 1, 2);
++                mark_motion_partition(partitions, x + 1, y, 1, 2);
++            } else {
++                mark_motion_partition(partitions, x, y, 1, 1);
++                mark_motion_partition(partitions, x + 1, y, 1, 1);
++                mark_motion_partition(partitions, x, y + 1, 1, 1);
++                mark_motion_partition(partitions, x + 1, y + 1, 1, 1);
++            }
++        }
++    } else if (IS_16X8(mb_type)) {
++        mark_motion_partition(partitions, 0, 0, 4, 2);
++        mark_motion_partition(partitions, 0, 2, 4, 2);
++    } else if (IS_8X16(mb_type)) {
++        mark_motion_partition(partitions, 0, 0, 2, 4);
++        mark_motion_partition(partitions, 2, 0, 2, 4);
++    } else {
++        mark_motion_partition(partitions, 0, 0, 4, 4);
++    }
++}
++
+ static av_always_inline void write_back_motion_list(const H264Context *h,
+                                                     H264SliceContext *sl,
+                                                     int b_stride,
+@@ -124,6 +232,7 @@ static av_always_inline void write_back_motion_list(const H264Context *h,
+         ref_index[1 + 0 * 2] = ref_cache[scan8[4]];
+         ref_index[0 + 1 * 2] = ref_cache[scan8[8]];
+         ref_index[1 + 1 * 2] = ref_cache[scan8[12]];
++        write_back_motion_references(h, sl, list, b8_xy, mb_type);
+     }
+ }
+ 
+@@ -135,14 +244,24 @@ static av_always_inline void write_back_motion(const H264Context *h,
+     const int b_xy  = 4 * sl->mb_x + 4 * sl->mb_y * h->b_stride; // try mb2b(8)_xy
+     const int b8_xy = 4 * sl->mb_xy;
+ 
++    write_back_motion_partitions(h, sl, mb_type);
++
+     if (USES_LIST(mb_type, 0)) {
+         write_back_motion_list(h, sl, b_stride, b_xy, b8_xy, mb_type, 0);
+     } else {
+         fill_rectangle(&h->cur_pic.ref_index[0][b8_xy],
+                        2, 2, 2, (uint8_t)LIST_NOT_USED, 1);
++        memset(&h->cur_pic.motion_ref[0][b8_xy], 0,
++               4 * sizeof(*h->cur_pic.motion_ref[0]));
+     }
+-    if (USES_LIST(mb_type, 1))
++    if (USES_LIST(mb_type, 1)) {
+         write_back_motion_list(h, sl, b_stride, b_xy, b8_xy, mb_type, 1);
++    } else {
++        fill_rectangle(&h->cur_pic.ref_index[1][b8_xy],
++                       2, 2, 2, (uint8_t)LIST_NOT_USED, 1);
++        memset(&h->cur_pic.motion_ref[1][b8_xy], 0,
++               4 * sizeof(*h->cur_pic.motion_ref[1]));
++    }
+ 
+     if (sl->slice_type_nos == AV_PICTURE_TYPE_B && CABAC(h)) {
+         if (IS_8X8(mb_type)) {
+diff --git a/libavcodec/h264_picture.c b/libavcodec/h264_picture.c
+index ce75b0c..898b081 100644
+--- a/libavcodec/h264_picture.c
++++ b/libavcodec/h264_picture.c
+@@ -54,7 +54,9 @@ void ff_h264_unref_picture(H264Picture *pic)
+     for (i = 0; i < 2; i++) {
+         av_refstruct_unref(&pic->motion_val_base[i]);
+         av_refstruct_unref(&pic->ref_index[i]);
++        av_refstruct_unref(&pic->motion_ref[i]);
+     }
++    av_refstruct_unref(&pic->motion_partition);
+     av_refstruct_unref(&pic->decode_error_flags);
+ 
+     memset((uint8_t*)pic + off, 0, sizeof(*pic) - off);
+@@ -69,7 +71,9 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
+     for (int i = 0; i < 2; i++) {
+         av_refstruct_replace(&dst->motion_val_base[i], src->motion_val_base[i]);
+         av_refstruct_replace(&dst->ref_index[i],       src->ref_index[i]);
++        av_refstruct_replace(&dst->motion_ref[i],      src->motion_ref[i]);
+     }
++    av_refstruct_replace(&dst->motion_partition, src->motion_partition);
+ 
+     av_refstruct_replace(&dst->hwaccel_picture_private,
+                           src->hwaccel_picture_private);
+@@ -102,6 +106,7 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
+     dst->mb_width      = src->mb_width;
+     dst->mb_height     = src->mb_height;
+     dst->mb_stride     = src->mb_stride;
++    dst->b_stride      = src->b_stride;
+     dst->needs_fg      = src->needs_fg;
+ }
+ 
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index a13047f..3cb351b 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -172,13 +172,19 @@ static int init_table_pools(H264Context *h)
+     h->motion_val_pool   = av_refstruct_pool_alloc(2 * (b4_array_size + 4) *
+                                                    sizeof(int16_t), 0);
+     h->ref_index_pool    = av_refstruct_pool_alloc(4 * mb_array_size, 0);
++    h->motion_ref_pool   = av_refstruct_pool_alloc(4 * mb_array_size *
++                                                   sizeof(H264MotionReference), 0);
++    h->motion_partition_pool = av_refstruct_pool_alloc(16 * mb_array_size, 0);
+ 
+     if (!h->qscale_table_pool || !h->mb_type_pool || !h->motion_val_pool ||
+-        !h->ref_index_pool) {
++        !h->ref_index_pool || !h->motion_ref_pool ||
++        !h->motion_partition_pool) {
+         av_refstruct_pool_uninit(&h->qscale_table_pool);
+         av_refstruct_pool_uninit(&h->mb_type_pool);
+         av_refstruct_pool_uninit(&h->motion_val_pool);
+         av_refstruct_pool_uninit(&h->ref_index_pool);
++        av_refstruct_pool_uninit(&h->motion_ref_pool);
++        av_refstruct_pool_uninit(&h->motion_partition_pool);
+         return AVERROR(ENOMEM);
+     }
+ 
+@@ -253,17 +259,27 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
+     for (i = 0; i < 2; i++) {
+         pic->motion_val_base[i] = av_refstruct_pool_get(h->motion_val_pool);
+         pic->ref_index[i]       = av_refstruct_pool_get(h->ref_index_pool);
+-        if (!pic->motion_val_base[i] || !pic->ref_index[i])
++        pic->motion_ref[i]      = av_refstruct_pool_get(h->motion_ref_pool);
++        if (!pic->motion_val_base[i] || !pic->ref_index[i] ||
++            !pic->motion_ref[i])
+             goto fail;
+ 
+         pic->motion_val[i] = pic->motion_val_base[i] + 4;
++        memset(pic->motion_ref[i], 0,
++               4 * h->mb_stride * h->mb_height *
++               sizeof(*pic->motion_ref[i]));
+     }
++    pic->motion_partition = av_refstruct_pool_get(h->motion_partition_pool);
++    if (!pic->motion_partition)
++        goto fail;
++    memset(pic->motion_partition, 0, 16 * h->mb_stride * h->mb_height);
+ 
+     pic->pps = av_refstruct_ref_c(h->ps.pps);
+ 
+     pic->mb_width  = h->mb_width;
+     pic->mb_height = h->mb_height;
+     pic->mb_stride = h->mb_stride;
++    pic->b_stride  = h->b_stride;
+ 
+     return 0;
+ fail:
+@@ -413,6 +429,7 @@ int ff_h264_update_thread_context(AVCodecContext *dst,
+         return ret;
+ 
+     h->enable_er       = h1->enable_er;
++    h->motion_metadata_only = h1->motion_metadata_only;
+     h->workaround_bugs = h1->workaround_bugs;
+     h->droppable       = h1->droppable;
+ 
+@@ -2455,7 +2472,7 @@ static void loop_filter(const H264Context *h, H264SliceContext *sl, int start_x,
+     const int pixel_shift    = h->pixel_shift;
+     const int block_h        = 16 >> h->chroma_y_shift;
+ 
+-    if (h->postpone_filter)
++    if (h->postpone_filter || h->motion_metadata_only)
+         return;
+ 
+     if (sl->deblocking_filter) {
+@@ -2632,7 +2649,7 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+             ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0 && !h->motion_metadata_only)
+                 ff_h264_hl_decode_mb(h, sl);
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+@@ -2641,7 +2658,7 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+                 ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0 && !h->motion_metadata_only)
+                     ff_h264_hl_decode_mb(h, sl);
+                 sl->mb_y--;
+             }
+@@ -2703,7 +2720,7 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+             ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0 && !h->motion_metadata_only)
+                 ff_h264_hl_decode_mb(h, sl);
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+@@ -2711,7 +2728,7 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+                 sl->mb_y++;
+                 ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0 && !h->motion_metadata_only)
+                     ff_h264_hl_decode_mb(h, sl);
+                 sl->mb_y--;
+             }
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index b78b798..349625d 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -34,6 +34,7 @@
+ #include "libavutil/emms.h"
+ #include "libavutil/imgutils.h"
+ #include "libavutil/mem.h"
++#include "libavutil/motion_vector.h"
+ #include "libavutil/opt.h"
+ #include "libavutil/thread.h"
+ #include "libavutil/video_enc_params.h"
+@@ -59,6 +60,110 @@
+ 
+ const uint16_t ff_h264_mb_sizes[4] = { 256, 384, 512, 768 };
+ 
++#define H264_MV_PTS_MIN (-(INT64_C(1) << 47))
++#define H264_MV_PTS_MAX ((INT64_C(1) << 47) - 1)
++
++static uint64_t h264_motion_flags(const H264MotionReference *reference)
++{
++    uint64_t flags = reference->flags;
++
++    if (flags & AV_MV_FLAG_PTS_DELTA_VALID) {
++        if (reference->pts_delta < H264_MV_PTS_MIN ||
++            reference->pts_delta > H264_MV_PTS_MAX) {
++            flags &= ~AV_MV_FLAG_PTS_DELTA_VALID;
++        } else {
++            flags |= ((uint64_t)reference->pts_delta &
++                      UINT64_C(0x0000ffffffffffff)) <<
++                     AV_MV_FLAG_PTS_DELTA_SHIFT;
++        }
++    }
++    return flags;
++}
++
++static void add_h264_motion_vector(AVMotionVector *output,
++                                   const H264Picture *picture,
++                                   int list, int b_xy, int b8_xy,
++                                   int dst_x, int dst_y, int width, int height,
++                                   int vertical_multiplier)
++{
++    const H264MotionReference *reference = &picture->motion_ref[list][b8_xy];
++    const int16_t *motion = picture->motion_val[list][b_xy];
++
++    output->source       = reference->poc_delta;
++    output->w            = width;
++    output->h            = height;
++    output->dst_x        = dst_x;
++    output->dst_y        = dst_y;
++    output->motion_x     = motion[0];
++    output->motion_y     = motion[1] * vertical_multiplier;
++    output->motion_scale = 4;
++    output->src_x        = dst_x + motion[0] / 4;
++    output->src_y        = dst_y + output->motion_y / 4;
++    output->flags        = h264_motion_flags(reference);
++}
++
++static int h264_export_motion_vectors(AVFrame *frame,
++                                      const H264Picture *picture)
++{
++    size_t capacity;
++    AVMotionVector *vectors;
++    size_t count = 0;
++
++    if (av_size_mult((size_t)picture->mb_width * picture->mb_height,
++                     32, &capacity) < 0)
++        return AVERROR(EINVAL);
++    vectors = av_calloc(capacity, sizeof(*vectors));
++    if (!vectors && capacity)
++        return AVERROR(ENOMEM);
++
++    for (int mb_y = 0; mb_y < picture->mb_height; mb_y++) {
++        for (int mb_x = 0; mb_x < picture->mb_width; mb_x++) {
++            const int mb_xy = mb_x + mb_y * picture->mb_stride;
++            const int mb_type = picture->mb_type[mb_xy];
++            const int vertical_multiplier =
++                IS_INTERLACED(mb_type) &&
++                (IS_16X8(mb_type) || IS_8X16(mb_type)) ? 2 : 1;
++            if (!IS_INTER(mb_type) && !IS_DIRECT(mb_type))
++                continue;
++            for (int y = 0; y < 4; y++) {
++                for (int x = 0; x < 4; x++) {
++                    const int partition =
++                        picture->motion_partition[16 * mb_xy + 4 * y + x];
++                    const int width = 4 * (partition >> 4);
++                    const int height = 4 * (partition & 15);
++                    const int dst_x = mb_x * 16 + x * 4 + width / 2;
++                    const int dst_y = mb_y * 16 + y * 4 + height / 2;
++                    const int b_xy = mb_x * 4 + x +
++                                     (mb_y * 4 + y) * picture->b_stride;
++                    const int b8_xy = mb_xy * 4 + (x >> 1) + 2 * (y >> 1);
++                    if (!partition)
++                        continue;
++                    for (int list = 0; list < 2; list++) {
++                        if (!(picture->motion_ref[list][b8_xy].flags &
++                              AV_MV_FLAG_REFERENCE_EXACT))
++                            continue;
++                        add_h264_motion_vector(&vectors[count++], picture, list,
++                                               b_xy, b8_xy, dst_x, dst_y,
++                                               width, height,
++                                               vertical_multiplier);
++                    }
++                }
++            }
++        }
++    }
++    if (count) {
++        AVFrameSideData *side_data = av_frame_new_side_data(
++            frame, AV_FRAME_DATA_MOTION_VECTORS, count * sizeof(*vectors));
++        if (!side_data) {
++            av_free(vectors);
++            return AVERROR(ENOMEM);
++        }
++        memcpy(side_data->data, vectors, count * sizeof(*vectors));
++    }
++    av_free(vectors);
++    return 0;
++}
++
+ int avpriv_h264_has_num_reorder_frames(AVCodecContext *avctx)
+ {
+     H264Context *h = avctx->priv_data;
+@@ -161,6 +266,8 @@ void ff_h264_free_tables(H264Context *h)
+     av_refstruct_pool_uninit(&h->mb_type_pool);
+     av_refstruct_pool_uninit(&h->motion_val_pool);
+     av_refstruct_pool_uninit(&h->ref_index_pool);
++    av_refstruct_pool_uninit(&h->motion_ref_pool);
++    av_refstruct_pool_uninit(&h->motion_partition_pool);
+ 
+ #if CONFIG_ERROR_RESILIENCE
+     av_freep(&h->er.mb_index2xy);
+@@ -420,6 +527,12 @@ static av_cold int h264_decode_init(AVCodecContext *avctx)
+ 
+     ff_h264_flush_change(h);
+ 
++    /* Error concealment synthesizes motion from reconstructed pixels and can
++     * overwrite the syntax-derived field.  Metadata-only decoding deliberately
++     * exposes only information that is present in or derived from the bitstream. */
++    if (h->motion_metadata_only)
++        h->enable_er = 0;
++
+     if (h->enable_er < 0 && (avctx->active_thread_type & FF_THREAD_SLICE))
+         h->enable_er = 0;
+ 
+@@ -934,7 +1047,7 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
+         )
+             return 0;
+ 
+-        if (!h->avctx->hwaccel &&
++        if (!h->motion_metadata_only && !h->avctx->hwaccel &&
+             (out->field_poc[0] == INT_MAX ||
+              out->field_poc[1] == INT_MAX)
+            ) {
+@@ -961,13 +1074,22 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
+         if (ret < 0)
+             return ret;
+ 
++        if (h->avctx->export_side_data & AV_CODEC_EXPORT_DATA_MVS) {
++            ret = h264_export_motion_vectors(dst, out);
++            if (ret < 0) {
++                av_frame_unref(dst);
++                return ret;
++            }
++        }
++
+         *got_frame = 1;
+ 
+         if (CONFIG_MPEGVIDEODEC) {
+             ff_print_debug_info2(h->avctx, dst,
+                                  out->mb_type,
+                                  out->qscale_table,
+-                                 out->motion_val,
++                                 h->avctx->export_side_data & AV_CODEC_EXPORT_DATA_MVS ?
++                                 NULL : out->motion_val,
+                                  out->mb_width, out->mb_height, out->mb_stride, 1);
+         }
+     }
+@@ -1093,6 +1215,7 @@ static const AVOption h264_options[] = {
+     { "is_avc", "is avc", OFFSET(is_avc), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VDX },
+     { "nal_length_size", "nal_length_size", OFFSET(nal_length_size), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 4, VDX },
+     { "enable_er", "Enable error resilience on damaged frames (unsafe)", OFFSET(enable_er), AV_OPT_TYPE_BOOL, { .i64 = -1 }, -1, 1, VD },
++    { "motion_metadata_only", "Decode H.264 syntax and motion metadata without reconstructing pixels", OFFSET(motion_metadata_only), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
+     { "x264_build", "Assume this x264 version if no x264 version found in any SEI", OFFSET(x264_build), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, VD },
+     { "skip_gray", "Do not return gray gap frames", OFFSET(skip_gray), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VD },
+     { "noref_gray", "Avoid using gray gap frames as references", OFFSET(noref_gray), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, VD },
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 74fd09d..7372d60 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -109,6 +109,12 @@ typedef struct MMCO {
+     int long_arg;       ///< index, pic_num, or num long refs depending on opcode
+ } MMCO;
+ 
++typedef struct H264MotionReference {
++    int64_t pts_delta;
++    int32_t poc_delta;
++    uint16_t flags;
++} H264MotionReference;
++
+ typedef struct H264Picture {
+     AVFrame *f;
+     ThreadFrame tf;
+@@ -128,6 +134,8 @@ typedef struct H264Picture {
+     void *hwaccel_picture_private;
+ 
+     int8_t *ref_index[2];   ///< RefStruct reference
++    H264MotionReference *motion_ref[2]; ///< exact reference for each 8x8 block
++    uint8_t *motion_partition; ///< packed width/height for each 4x4 partition origin
+ 
+     int field_poc[2];       ///< top/bottom POC
+     int poc;                ///< frame POC
+@@ -157,6 +165,7 @@ typedef struct H264Picture {
+ 
+     int mb_width, mb_height;
+     int mb_stride;
++    int b_stride;
+ 
+     /// RefStruct reference; its pointee is shared between decoding threads.
+     atomic_int *decode_error_flags;
+@@ -562,6 +571,7 @@ typedef struct H264Context {
+     int height_from_caller;
+ 
+     int enable_er;
++    int motion_metadata_only;
+     ERContext er;
+     int16_t *dc_val_base;
+ 
+@@ -571,6 +581,8 @@ typedef struct H264Context {
+     struct AVRefStructPool *mb_type_pool;
+     struct AVRefStructPool *motion_val_pool;
+     struct AVRefStructPool *ref_index_pool;
++    struct AVRefStructPool *motion_ref_pool;
++    struct AVRefStructPool *motion_partition_pool;
+     struct AVRefStructPool *decode_error_flags_pool;
+     int ref2frm[MAX_SLICES][2][64];     ///< reference to frame number lists, used in the loop filter, the first 2 are for -2,-1
+ 
+diff --git a/libavutil/motion_vector.h b/libavutil/motion_vector.h
+index ec29556..d371f78 100644
+--- a/libavutil/motion_vector.h
++++ b/libavutil/motion_vector.h
+@@ -21,11 +21,40 @@
+ 
+ #include <stdint.h>
+ 
++/**
++ * The reference index in the codec's active reference-picture list.
++ * Valid only when AV_MV_FLAG_REFERENCE_EXACT is set.
++ */
++#define AV_MV_FLAG_REFERENCE_INDEX_MASK UINT64_C(0x3f)
++
++/** The vector uses reference-picture list 1 rather than list 0. */
++#define AV_MV_FLAG_REFERENCE_LIST1      (UINT64_C(1) << 6)
++/** The selected picture is a long-term reference. */
++#define AV_MV_FLAG_LONG_REFERENCE       (UINT64_C(1) << 7)
++/** The selected reference contains the top field. */
++#define AV_MV_FLAG_REFERENCE_TOP_FIELD  (UINT64_C(1) << 8)
++/** The selected reference contains the bottom field. */
++#define AV_MV_FLAG_REFERENCE_BOTTOM_FIELD (UINT64_C(1) << 9)
++/** The vector was derived by a codec direct-prediction mode. */
++#define AV_MV_FLAG_DIRECT               (UINT64_C(1) << 10)
++/** The vector belongs to a skipped block. */
++#define AV_MV_FLAG_SKIP                 (UINT64_C(1) << 11)
++/** The vector belongs to a field-coded block. */
++#define AV_MV_FLAG_INTERLACED           (UINT64_C(1) << 12)
++/** A signed timestamp delta is stored in flags bits 16 through 63. */
++#define AV_MV_FLAG_PTS_DELTA_VALID      (UINT64_C(1) << 13)
++/** source and the reference-list fields identify the exact reference. */
++#define AV_MV_FLAG_REFERENCE_EXACT      (UINT64_C(1) << 14)
++#define AV_MV_FLAG_PTS_DELTA_SHIFT      16
++
+ typedef struct AVMotionVector {
+     /**
+-     * Where the current macroblock comes from; negative value when it comes
+-     * from the past, positive value when it comes from the future.
+-     * XXX: set exact relative ref frame reference instead of a +/- 1 "direction".
++     * Where the current block comes from. Negative values refer to an earlier
++     * presentation-order picture and positive values to a later one.
++     *
++     * When AV_MV_FLAG_REFERENCE_EXACT is set this is the exact codec picture-
++     * order-count delta (reference minus current). Otherwise only the sign is
++     * defined.
+      */
+     int32_t source;
+     /**
+@@ -41,8 +70,11 @@ typedef struct AVMotionVector {
+      */
+     int16_t dst_x, dst_y;
+     /**
+-     * Extra flag information.
+-     * Currently unused.
++     * Reference and coding information described by AV_MV_FLAG_*.
++     *
++     * When AV_MV_FLAG_PTS_DELTA_VALID is set, casting flags to int64_t and
++     * shifting right by AV_MV_FLAG_PTS_DELTA_SHIFT yields the signed reference
++     * timestamp minus current timestamp in the AVFrame timestamp time base.
+      */
+     uint64_t flags;
+     /**
+-- 
+2.34.1
