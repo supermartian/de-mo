@@ -1,5 +1,10 @@
 # Design Proposal: Codec Motion-Vector–Driven Video Stabilization Using FFmpeg
 
+> Historical V0 proposal. The implemented exact-reference and metadata-only
+> design is documented in [`design.md`](design.md). Statements below that stock
+> `AVMotionVector` is sufficient or that no FFmpeg patch is needed no longer
+> describe the current architecture.
+
 **Project working name:** `mvstab`  
 **Status:** Engineering design / implementation plan  
 **Primary goal:** Replace pixel-domain motion detection with motion vectors extracted from the compressed video stream, while reusing FFmpeg and vid.stab for as much of the remaining pipeline as possible.  
