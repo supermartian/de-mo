@@ -7,6 +7,11 @@ the final render pass.
 
 ## Showcase
 
+[![Eight-second mvstab and vid.stab comparison](assets/mvstab-showcase.gif)](mvstab-comparison.mp4)
+
+The animated preview uses a calmer section of the driving clip. Select it to
+open the full-length comparison.
+
 <video
   src="https://github.com/supermartian/de-mo/raw/refs/heads/main/mvstab-comparison.mp4"
   controls
