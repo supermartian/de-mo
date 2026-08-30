@@ -29,6 +29,41 @@ static int compare_candidate_residual(const void *left, const void *right) {
     return (a->residual > b->residual) - (a->residual < b->residual);
 }
 
+static int compare_candidate_reference(const void *left, const void *right) {
+    const MvstabCandidate *a = left;
+    const MvstabCandidate *b = right;
+    const MvstabVector *av = a->vector;
+    const MvstabVector *bv = b->vector;
+    if (av->reference_pts_delta != bv->reference_pts_delta) {
+        return (av->reference_pts_delta > bv->reference_pts_delta) -
+               (av->reference_pts_delta < bv->reference_pts_delta);
+    }
+    if (av->reference_poc_delta != bv->reference_poc_delta) {
+        return (av->reference_poc_delta > bv->reference_poc_delta) -
+               (av->reference_poc_delta < bv->reference_poc_delta);
+    }
+    if (av->reference_top_field != bv->reference_top_field) {
+        return av->reference_top_field - bv->reference_top_field;
+    }
+    if (av->reference_bottom_field != bv->reference_bottom_field) {
+        return av->reference_bottom_field - bv->reference_bottom_field;
+    }
+    return av->reference_long_term - bv->reference_long_term;
+}
+
+static int candidates_share_reference(
+    const MvstabCandidate *left,
+    const MvstabCandidate *right
+) {
+    const MvstabVector *a = left->vector;
+    const MvstabVector *b = right->vector;
+    return a->reference_pts_delta == b->reference_pts_delta &&
+           a->reference_poc_delta == b->reference_poc_delta &&
+           a->reference_top_field == b->reference_top_field &&
+           a->reference_bottom_field == b->reference_bottom_field &&
+           a->reference_long_term == b->reference_long_term;
+}
+
 double mvstab_weighted_median(
     MvstabCandidate *candidates,
     size_t count,
@@ -132,6 +167,64 @@ static size_t collect_candidates(
         }
         candidates[accepted].weight = candidates[accepted].base_weight;
         *exact_count += exact_timing;
+        ++accepted;
+    }
+    return accepted;
+}
+
+static int exact_vector_is_usable(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    const MvstabVector *vector
+) {
+    double span;
+    double limit;
+    int margin = vector->width > vector->height ? vector->width : vector->height;
+    if (!vector->reference_exact || !vector->reference_pts_valid ||
+        !isfinite(vector->reference_delta_seconds) ||
+        vector->reference_delta_seconds == 0.0 ||
+        !isfinite(frame->duration_seconds) || frame->duration_seconds <= 0.0) {
+        return 0;
+    }
+    span = fabs(vector->reference_delta_seconds) / frame->duration_seconds;
+    limit = config->max_mv_px * fmax(1.0, span);
+    if (vector->motion_scale == 0 || vector->width <= 0 || vector->height <= 0 ||
+        !isfinite(vector->x) || !isfinite(vector->y) ||
+        !isfinite(vector->dx) || !isfinite(vector->dy) ||
+        !isfinite(vector->weight) || vector->weight <= 0.0 ||
+        hypot(vector->dx, vector->dy) > limit) {
+        return 0;
+    }
+    if (vector->prediction_skip && vector->motion_x == 0 && vector->motion_y == 0) {
+        return 0;
+    }
+    return vector->x >= -margin && vector->y >= -margin &&
+           vector->x <= frame->width + margin && vector->y <= frame->height + margin;
+}
+
+static size_t collect_edge_candidates(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    MvstabCandidate *candidates
+) {
+    size_t accepted = 0;
+    for (size_t index = 0; index < frame->vector_count; ++index) {
+        const MvstabVector *vector = &frame->vectors[index];
+        if (!exact_vector_is_usable(frame, config, vector)) {
+            continue;
+        }
+        candidates[accepted].vector = vector;
+        candidates[accepted].dx = vector->dx;
+        candidates[accepted].dy = vector->dy;
+        candidates[accepted].base_weight = sqrt(
+            fmin(vector->weight, config->block_area_cap));
+        if (vector->prediction_skip) {
+            candidates[accepted].base_weight *= 0.5;
+        }
+        if (vector->prediction_direct) {
+            candidates[accepted].base_weight *= 0.75;
+        }
+        candidates[accepted].weight = candidates[accepted].base_weight;
         ++accepted;
     }
     return accepted;
@@ -347,10 +440,9 @@ MvstabEstimatorConfig mvstab_default_estimator_config(void) {
 
 static int config_is_valid(
     const MvstabFrame *frame,
-    const MvstabEstimatorConfig *config,
-    const FrameMotion *motion
+    const MvstabEstimatorConfig *config
 ) {
-    return frame != NULL && config != NULL && motion != NULL &&
+    return frame != NULL && config != NULL &&
         isfinite(config->residual_threshold_px) && isfinite(config->max_mv_px) &&
         isfinite(config->block_area_cap) && isfinite(config->mad_threshold) &&
         isfinite(config->min_confidence) && isfinite(config->min_spatial_coverage) &&
@@ -365,19 +457,57 @@ static int config_is_valid(
         (frame->vector_count == 0 || frame->vectors != NULL);
 }
 
+static int estimate_candidate_motion(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    MvstabCandidate *candidates,
+    size_t count,
+    int compare_references,
+    FrameMotion *motion
+) {
+    SimilarityModel model = {{0}};
+    double threshold = 0.0;
+    double total_weight;
+    memset(motion, 0, sizeof(*motion));
+    motion->vector_count = (int)count;
+    if (count < 2) {
+        return 0;
+    }
+    total_weight = balance_grid_weights(frame, config, candidates, count);
+    if (robust_similarity_fit(frame, config, candidates, count,
+                              &model, &threshold) != 0) {
+        return 0;
+    }
+    motion->dx = model.value[0];
+    motion->dy = model.value[1];
+    motion->scale = model.value[2] / fmax(frame->width, frame->height);
+    motion->theta = model.value[3] / fmax(frame->width, frame->height);
+    for (size_t index = 0; index < count; ++index) {
+        candidates[index].inlier = candidates[index].residual <= threshold;
+        candidates[index].weight = candidates[index].base_weight;
+        motion->inlier_count += candidates[index].inlier;
+    }
+    mvstab_compute_confidence(frame, config, candidates, count,
+                              total_weight, motion);
+    motion->reference_agreement = compare_references ? reference_agreement(
+        frame, candidates, count, &model, config->residual_threshold_px) : 1.0;
+    motion->confidence *= motion->reference_agreement;
+    motion->valid = motion->confidence >= config->min_confidence &&
+                    motion->spatial_coverage >= config->min_spatial_coverage &&
+                    motion->reference_agreement >= exp(-4.0);
+    return 0;
+}
+
 int mvstab_estimate_frame(
     const MvstabFrame *frame,
     const MvstabEstimatorConfig *config,
     FrameMotion *motion
 ) {
     MvstabCandidate *candidates;
-    SimilarityModel model = {{0}};
     size_t count;
     size_t exact_count;
-    double total_weight;
-    double threshold = 0.0;
 
-    if (!config_is_valid(frame, config, motion)) {
+    if (motion == NULL || !config_is_valid(frame, config)) {
         return -1;
     }
     memset(motion, 0, sizeof(*motion));
@@ -389,30 +519,100 @@ int mvstab_estimate_frame(
         return -1;
     }
     count = collect_candidates(frame, config, candidates, &exact_count);
-    motion->vector_count = (int)count;
+    estimate_candidate_motion(frame, config, candidates, count, 1, motion);
     motion->temporal_normalized = count > 0 && exact_count == count;
-    total_weight = balance_grid_weights(frame, config, candidates, count);
-    if (count >= 2 && robust_similarity_fit(frame, config, candidates, count,
-                                             &model, &threshold) == 0) {
-        double radius = fmax(frame->width, frame->height);
-        motion->dx = model.value[0];
-        motion->dy = model.value[1];
-        motion->scale = model.value[2] / radius;
-        motion->theta = model.value[3] / radius;
-        for (size_t index = 0; index < count; ++index) {
-            candidates[index].inlier = candidates[index].residual <= threshold;
-            candidates[index].weight = candidates[index].base_weight;
-            motion->inlier_count += candidates[index].inlier;
+    free(candidates);
+    return 0;
+}
+
+static int add_motion_edge(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    MvstabCandidate *candidates,
+    size_t count,
+    MvstabMotionEdge *edge
+) {
+    int64_t delta = candidates[0].vector->reference_pts_delta;
+    if (estimate_candidate_motion(frame, config, candidates, count, 0,
+                                  &edge->motion) != 0 || !edge->motion.valid) {
+        return 0;
+    }
+    if (frame->pts == INT64_MIN) {
+        edge->reference_pts = INT64_MIN;
+    } else {
+        if ((delta > 0 && frame->pts > INT64_MAX - delta) ||
+            (delta < 0 && frame->pts < INT64_MIN - delta)) {
+            return 0;
         }
-        mvstab_compute_confidence(frame, config, candidates, count,
-                                  total_weight, motion);
-        motion->reference_agreement = reference_agreement(
-            frame, candidates, count, &model, config->residual_threshold_px);
-        motion->confidence *= motion->reference_agreement;
-        motion->valid = motion->confidence >= config->min_confidence &&
-                        motion->spatial_coverage >= config->min_spatial_coverage &&
-                        motion->reference_agreement >= exp(-4.0);
+        edge->reference_pts = frame->pts + delta;
+    }
+    edge->reference_pts_seconds = frame->pts_seconds +
+        candidates[0].vector->reference_delta_seconds;
+    return isfinite(edge->reference_pts_seconds);
+}
+
+static size_t count_reference_groups(
+    const MvstabCandidate *candidates,
+    size_t count
+) {
+    size_t groups = 0;
+    for (size_t index = 0; index < count; ++index) {
+        if (index == 0 ||
+            !candidates_share_reference(&candidates[index - 1],
+                                        &candidates[index])) {
+            ++groups;
+        }
+    }
+    return groups;
+}
+
+int mvstab_estimate_frame_edges(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    MvstabMotionEdge **edges,
+    size_t *edge_count
+) {
+    MvstabCandidate *candidates;
+    MvstabMotionEdge *result;
+    size_t count;
+    size_t group_count;
+    size_t start = 0;
+    if (edges == NULL || edge_count == NULL || !config_is_valid(frame, config)) {
+        return -1;
+    }
+    *edges = NULL;
+    *edge_count = 0;
+    if (frame->key_frame || frame->vector_count == 0) {
+        return 0;
+    }
+    candidates = calloc(frame->vector_count, sizeof(*candidates));
+    if (candidates == NULL) {
+        free(candidates);
+        return -1;
+    }
+    count = collect_edge_candidates(frame, config, candidates);
+    qsort(candidates, count, sizeof(*candidates), compare_candidate_reference);
+    group_count = count_reference_groups(candidates, count);
+    result = calloc(group_count, sizeof(*result));
+    if (group_count > 0 && result == NULL) {
+        free(candidates);
+        return -1;
+    }
+    while (start < count) {
+        size_t end = start + 1;
+        while (end < count &&
+               candidates_share_reference(&candidates[start], &candidates[end])) {
+            ++end;
+        }
+        *edge_count += add_motion_edge(frame, config, &candidates[start],
+                                       end - start, &result[*edge_count]);
+        start = end;
     }
     free(candidates);
+    if (*edge_count == 0) {
+        free(result);
+        return 0;
+    }
+    *edges = result;
     return 0;
 }

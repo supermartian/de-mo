@@ -14,6 +14,7 @@ option(MVSTAB_REQUIRE_EXACT_METADATA_TESTS
 add_library(mvstab_core
     src/confidence.c
     src/mv_normalize.c
+    src/pose_graph.c
     src/timeline.c
     src/translation_fit.c
 )

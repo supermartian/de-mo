@@ -28,4 +28,12 @@ int mvstab_estimate_frame(
     FrameMotion *motion
 );
 
+/* Allocates exact-reference edges; the caller owns and must free *edges. */
+int mvstab_estimate_frame_edges(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    MvstabMotionEdge **edges,
+    size_t *edge_count
+);
+
 #endif

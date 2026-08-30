@@ -261,6 +261,121 @@ static int test_invalid_exact_measurement_does_not_select_precise_mode(void) {
     return 0;
 }
 
+static void set_edge(
+    MvstabMotionEdge *edge,
+    int64_t reference_pts,
+    double dx
+) {
+    memset(edge, 0, sizeof(*edge));
+    edge->reference_pts = reference_pts;
+    edge->reference_pts_seconds = reference_pts / 30.0;
+    edge->motion.dx = dx;
+    edge->motion.confidence = 1.0;
+    edge->motion.spatial_coverage = 1.0;
+    edge->motion.valid = 1;
+}
+
+static int test_pose_graph_recovers_adjacent_motion(void) {
+    MvstabTimelineFrame frames[5];
+    MvstabMotionEdge edges[4];
+    int references[4] = {0, 0, 1, 2};
+    double motions[4] = {2.0, 4.0, 4.0, 4.0};
+    for (int index = 0; index < 5; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_B, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+    }
+    for (int index = 0; index < 4; ++index) {
+        set_edge(&edges[index], references[index], motions[index]);
+        frames[index + 1].edges = &edges[index];
+        frames[index + 1].edge_count = 1;
+    }
+    edges[3].reference_pts = INT64_MIN;
+    mvstab_build_timeline(frames, 5, MVSTAB_MODE_SAFE);
+    CHECK(frames[0].output.dx == 0.0);
+    for (int index = 1; index < 5; ++index) {
+        CHECK(fabs(frames[index].output.dx - 2.0) < 1e-7);
+        CHECK(frames[index].output.temporal_normalized);
+    }
+    return 0;
+}
+
+static int test_pose_graph_does_not_bridge_components(void) {
+    MvstabTimelineFrame frames[4];
+    MvstabMotionEdge edges[2];
+    for (int index = 0; index < 4; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_B, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+    }
+    set_edge(&edges[0], 0, 2.0);
+    set_edge(&edges[1], 2, 5.0);
+    frames[1].edges = &edges[0];
+    frames[1].edge_count = 1;
+    frames[3].edges = &edges[1];
+    frames[3].edge_count = 1;
+    mvstab_build_timeline(frames, 4, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx - 2.0) < 1e-7);
+    CHECK(frames[2].output.dx == 0.0);
+    CHECK(fabs(frames[3].output.dx - 5.0) < 1e-7);
+    return 0;
+}
+
+static int test_pose_graph_weights_confident_edges(void) {
+    MvstabTimelineFrame frames[2];
+    MvstabMotionEdge edges[2];
+    for (int index = 0; index < 2; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_P, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+    }
+    set_edge(&edges[0], 0, 2.0);
+    set_edge(&edges[1], 0, 10.0);
+    edges[1].motion.confidence = 0.1;
+    frames[1].edges = edges;
+    frames[1].edge_count = 2;
+    mvstab_build_timeline(frames, 2, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx - 30.0 / 11.0) < 1e-7);
+    return 0;
+}
+
+static int test_pose_graph_preserves_disconnected_measurement(void) {
+    MvstabTimelineFrame frames[3];
+    MvstabMotionEdge edge;
+    for (int index = 0; index < 3; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_B, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+    }
+    set_edge(&edge, 0, 2.0);
+    frames[1].edges = &edge;
+    frames[1].edge_count = 1;
+    frames[2].measured.valid = 1;
+    frames[2].measured.temporal_normalized = 1;
+    frames[2].measured.dx = 3.0;
+    mvstab_build_timeline(frames, 3, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx - 2.0) < 1e-7);
+    CHECK(fabs(frames[2].output.dx - 3.0) < 1e-7);
+    return 0;
+}
+
+static int test_pose_graph_defers_to_legacy_timeline(void) {
+    MvstabTimelineFrame frames[3];
+    MvstabMotionEdge edge;
+    initialize_frame(&frames[0], MVSTAB_PICTURE_I, 1);
+    initialize_frame(&frames[1], MVSTAB_PICTURE_B, 0);
+    initialize_frame(&frames[2], MVSTAB_PICTURE_P, 0);
+    set_edge(&edge, 0, 20.0);
+    frames[1].edges = &edge;
+    frames[1].edge_count = 1;
+    frames[2].measured.valid = 1;
+    frames[2].measured.dx = 4.0;
+    mvstab_build_timeline(frames, 3, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx - 2.0) < 1e-9);
+    CHECK(fabs(frames[2].output.dx - 2.0) < 1e-9);
+    return 0;
+}
+
 int main(void) {
     if (test_safe_mode_distributes_anchor_motion() != 0 ||
         test_invalid_p_frame_advances_anchor() != 0) {
@@ -292,5 +407,12 @@ int main(void) {
     if (test_exact_timeline_rejects_legacy_measurement() != 0) {
         return 1;
     }
-    return test_invalid_exact_measurement_does_not_select_precise_mode();
+    if (test_invalid_exact_measurement_does_not_select_precise_mode() != 0) {
+        return 1;
+    }
+    return test_pose_graph_recovers_adjacent_motion() != 0 ||
+           test_pose_graph_does_not_bridge_components() != 0 ||
+           test_pose_graph_weights_confident_edges() != 0 ||
+           test_pose_graph_preserves_disconnected_measurement() != 0 ||
+           test_pose_graph_defers_to_legacy_timeline() != 0;
 }

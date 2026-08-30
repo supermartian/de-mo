@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "internal.h"
+
 static FrameMotion identity_motion(int scene_cut) {
     FrameMotion motion;
     memset(&motion, 0, sizeof(motion));
@@ -231,6 +233,19 @@ static int precise_measurement_is_valid(const MvstabTimelineFrame *frame) {
     return frame->measured.valid && frame->measured.temporal_normalized;
 }
 
+static int has_legacy_valid_motion(
+    const MvstabTimelineFrame *frames,
+    size_t frame_count
+) {
+    for (size_t index = 0; index < frame_count; ++index) {
+        if (frames[index].measured.valid &&
+            !frames[index].measured.temporal_normalized) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void build_precise_timeline(
     MvstabTimelineFrame *frames,
     size_t frame_count
@@ -272,6 +287,11 @@ void mvstab_build_timeline(
     size_t index;
 
     if (frames == NULL || frame_count == 0) {
+        return;
+    }
+    if (!has_legacy_valid_motion(frames, frame_count) &&
+        mvstab_build_pose_graph_timeline(frames, frame_count) > 0) {
+        fill_keyframe_motion(frames, frame_count);
         return;
     }
     if (has_temporally_normalized_motion(frames, frame_count)) {

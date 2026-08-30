@@ -19,7 +19,8 @@ The repository includes:
 - an FFmpeg patch that exports exact H.264 references and adds syntax-only
   motion decoding;
 - exact reference-time normalization for P and B pictures;
-- a robust, spatially balanced similarity estimator;
+- robust, spatially balanced similarity fits per exact reference;
+- a confidence-weighted exact-reference pose graph;
 - CSV/JSON diagnostics and vid.stab-compatible transforms;
 - comparison, plotting, unit, and encoded end-to-end tests.
 
@@ -119,9 +120,11 @@ Always set `relative=1`. The transform contains inverse translation and the
 vid.stab-calibrated rotation sign. Scale is fitted as a nuisance term and is
 reported in stats, but the transform's zoom field is currently zero.
 
-With exact metadata, safe mode uses both P and B pictures, normalizes every MV
-by its actual reference duration, and interpolates only bounded continuous
-gaps. With stock FFmpeg, safe mode uses past-reference P-picture anchors.
+With exact metadata, safe mode uses both P and B pictures, fits each exact
+reference separately, and solves their constraints as a confidence-weighted
+camera pose graph. Disconnected reference components are independently
+anchored, and only continuous keyframe gaps are repaired. With stock
+FFmpeg, safe mode uses past-reference P-picture anchors.
 `--mode all-mvs` enables direction-only future-reference use on the fallback
 path and should be treated as experimental.
 
@@ -188,7 +191,7 @@ The supplied clip was already H.264 Main profile, 720×480 at 29.97 fps, with
 On the same host:
 
 - patched metadata-only H.264 decode: 3.28 s, versus 12.12 s full decode;
-- complete patched `mvstab analyze`: 4.70 s and about 16 MB RSS;
+- complete pose-graph `mvstab analyze`: 7.19 s and about 18 MB RSS;
 - `vidstabdetect`: 12.71 s wall, 246.57 CPU seconds, about 129 MB RSS;
 - full-decode and metadata-only exports matched byte-for-byte for all frames;
 - exact metadata was present on all 20,715,192 exported prediction records;
@@ -196,12 +199,15 @@ On the same host:
   on 7 frames, while the exact-timed estimator measured nonzero motion on
   11,088 frames;
 - after rendering each transform and measuring the remaining motion with the
-  same no-smoothing vid.stab pass, mvstab reduced median translation from
-  4.892 to 4.572 pixels and median rotation from 0.00421 to 0.00383 radians;
-  vid.stab's pixel-domain result reached 2.283 pixels and 0.00379 radians.
+  same no-smoothing vid.stab pass, the earlier per-frame mvstab estimator
+  reduced median translation from 4.892 to 4.572 pixels; the exact-reference
+  pose graph reaches 3.163 pixels and lowers median rotation from 0.00421 to
+  0.00287 radians; vid.stab's pixel-domain result reaches 2.283 pixels and
+  0.00379 radians.
 
 The last comparison is intentionally candid: exact bitstream timing makes the
-codec estimator useful and much cheaper, but it does not yet match vid.stab's
+codec estimator useful and much cheaper. Preserving multi-reference constraints
+closes much of the remaining gap, although it still does not match vid.stab's
 translation quality on this clip. Encoder decisions are a sparse proxy for
 camera motion, not optical-flow ground truth.
 

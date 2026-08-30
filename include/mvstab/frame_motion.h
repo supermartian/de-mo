@@ -46,6 +46,12 @@ typedef struct {
     int temporal_normalized;
 } FrameMotion;
 
+typedef struct {
+    int64_t reference_pts;
+    double reference_pts_seconds;
+    FrameMotion motion;
+} MvstabMotionEdge;
+
 const char *mvstab_picture_type_name(MvstabPictureType picture_type);
 
 #endif

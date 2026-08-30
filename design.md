@@ -27,12 +27,16 @@ FFmpeg H.264 syntax decode
 exact prediction partitions + final MVs + exact references
         |
         v
-reference-time normalization
+group vectors by exact reference picture
         |
         v
-robust spatially balanced similarity fit
-  - translation and rotation are output
-  - scale is a nuisance parameter
+robust spatially balanced similarity fit per reference edge
+        |
+        v
+confidence-weighted pose graph
+  - exact reference constraints
+  - independently anchored reference components
+  - weak acceleration regularization
         |
         v
 relative old-format vid.stab transforms
@@ -255,23 +259,43 @@ forward-driving expansion and other radial motion so it does not contaminate
 translation/rotation; scale is reported but is not currently sent to
 vid.stab.
 
-The fit uses:
+Each reference-edge fit uses:
 
 1. malformed, unsupported, and excessive-vector rejection;
-2. exact reference-time normalization where possible;
+2. exact grouping by reference timestamp where possible;
 3. reduced weight for skip/direct predictions and rejection of exact zero-skip
    evidence;
 4. capped partition-area weights;
 5. grid balancing so a textured road or moving foreground cannot own the fit;
 6. four Tukey-style iteratively reweighted least-squares rounds;
-7. residual inliers, spatial coverage, and past/future agreement;
-8. confidence gating and interpolation of bounded, continuous gaps.
+7. residual inliers and spatial coverage;
+8. confidence gating before the edge enters the trajectory solve.
 
 At least half-image support in both axes and support on opposing image halves
-is required. Exact-timed B and P pictures can both produce per-display-frame
-motion. Gaps of at most three frames are interpolated only when reliable models
-on both sides have continuous velocity; this covers isolated IDRs and rejected
-B pictures without bridging obvious discontinuities.
+is required. Exact-timed B and P pictures can both contribute constraints.
+
+### Exact-reference pose graph
+
+For an exact edge from reference picture `r` to current picture `i`, the raw
+similarity estimate is kept at its coded temporal span instead of first being
+divided into a one-frame estimate:
+
+```text
+pose[i] - pose[r] ~= edge[r -> i]
+```
+
+The four pose coordinates are translation X/Y, rotation, and fractional scale
+under a small-motion approximation. A sparse least-squares solve weights every
+edge by its fit confidence and spatial coverage. A weak second-difference penalty
+reduces trajectory noise without replacing the later vid.stab stabilization
+smoothing. Reference-connected components are solved and anchored separately,
+so the optimizer cannot pull one GOP or scene through an unrelated component.
+Adjacent pose differences become the relative output rows.
+
+If exact edge metadata is absent, the previous timestamp-normalized timeline is
+used unchanged. Its gaps of at most three frames are interpolated only when
+reliable models on both sides have continuous velocity. A continuity-gated
+repair fills isolated periodic keyframes after a graph solve.
 
 ## vid.stab output convention
 
@@ -317,8 +341,9 @@ Patch validation additionally covers:
 
 On the 720×480, 379.35-second driving clip, the patched decoder processed all
 11,369 frames in 3.28 seconds versus 12.12 seconds for full H.264 decode in the
-same single-process probe (3.7× faster). Full `mvstab analyze`, including robust
-fitting and CSV output, took 4.70 seconds and about 16 MB RSS. The earlier
+same single-process probe (3.7× faster). Full pose-graph `mvstab analyze`,
+including both diagnostic fitting and CSV output, took 7.19 seconds and about
+18 MB RSS. The earlier
 pixel-domain `vidstabdetect` run took 12.71 seconds wall time, 246.57 CPU
 seconds, and about 129 MB RSS on the same host.
 
@@ -327,12 +352,13 @@ selected pixel patches while mvstab observes encoder prediction. On this clip,
 the old sign-only safe implementation produced meaningful nonzero measured
 motion on only 7 frames; the exact-timed implementation produced nonzero
 measurements on 11,088 frames, with 7,931 passing confidence before bounded-gap
-repair. After rendering and re-measuring residual motion with the same
-no-smoothing vid.stab pass, mvstab reduced median translation from 4.892 to
-4.572 pixels and median rotation from 0.00421 to 0.00383 radians. The
-pixel-domain vid.stab result reached 2.283 pixels and 0.00379 radians. Exact
-metadata therefore closes a major correctness gap, but codec motion still does
-not match vid.stab's translation quality on this sequence.
+repair. The earlier per-frame exact estimator reduced median residual
+translation from 4.892 to 4.572 pixels. Keeping exact reference edges and
+solving the pose graph reduces it further to 3.163 pixels; median residual
+rotation falls from 0.00421 in the original to 0.00287 radians. The
+pixel-domain vid.stab result reached 2.283 pixels and 0.00379 radians. The graph
+therefore closes much of the remaining translation gap and improves rotation,
+while pixel-domain vid.stab still leads on translation for this sequence.
 
 ## Known boundaries and next work
 

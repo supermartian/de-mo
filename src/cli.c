@@ -599,11 +599,25 @@ static int analyze_callback(const MvstabFrame *frame, void *opaque) {
     }
     memset(timeline_frame, 0, sizeof(*timeline_frame));
     timeline_frame->frame_index = frame->display_index;
+    timeline_frame->pts = frame->pts;
     timeline_frame->pts_seconds = frame->pts_seconds;
     timeline_frame->picture_type = frame->picture_type;
     timeline_frame->key_frame = frame->key_frame;
     state->vector_count += frame->vector_count;
-    return mvstab_estimate_frame(frame, &state->config, &timeline_frame->measured);
+    if (mvstab_estimate_frame(frame, &state->config,
+                              &timeline_frame->measured) != 0) {
+        return -1;
+    }
+    return mvstab_estimate_frame_edges(frame, &state->config,
+                                       &timeline_frame->edges,
+                                       &timeline_frame->edge_count);
+}
+
+static void free_analysis_frames(AnalyzeState *state) {
+    for (size_t index = 0; index < state->frame_count; ++index) {
+        free(state->frames[index].edges);
+    }
+    free(state->frames);
 }
 
 static int reserve_analysis_temp(
@@ -821,7 +835,7 @@ static int run_analyze(int argc, char **argv) {
             printf("Wrote estimator statistics to %s\n", options.stats_path);
         }
     }
-    free(state.frames);
+    free_analysis_frames(&state);
     return result == 0 ? 0 : 1;
 }
 

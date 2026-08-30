@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#include "mvstab/estimator.h"
+#include "mvstab/timeline.h"
 
 typedef struct {
     const MvstabVector *vector;
@@ -28,6 +28,11 @@ void mvstab_compute_confidence(
     size_t count,
     double total_candidate_weight,
     FrameMotion *motion
+);
+
+int mvstab_build_pose_graph_timeline(
+    MvstabTimelineFrame *frames,
+    size_t frame_count
 );
 
 #endif

@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "mvstab/estimator.h"
@@ -176,6 +177,59 @@ static int test_exact_timing_unifies_distant_references(void) {
     return 0;
 }
 
+static int test_exact_edges_preserve_reference_motion(void) {
+    MvstabVector vectors[32];
+    MvstabEstimatorConfig config = mvstab_default_estimator_config();
+    MvstabFrame frame;
+    MvstabMotionEdge *edges = NULL;
+    size_t edge_count = 0;
+    for (int index = 0; index < 16; ++index) {
+        set_vector(&vectors[index], index * 2, 6.0, -3.0, -1);
+        set_exact_timing(&vectors[index], -0.1);
+        vectors[index].reference_pts_delta = -3;
+        set_vector(&vectors[index + 16], index * 2, -4.0, 2.0, 1);
+        set_exact_timing(&vectors[index + 16], 2.0 / 30.0);
+        vectors[index + 16].reference_pts_delta = 2;
+    }
+    frame = make_frame(vectors, 32);
+    frame.pts = 100;
+    frame.pts_seconds = 10.0;
+    CHECK(mvstab_estimate_frame_edges(&frame, &config, &edges, &edge_count) == 0);
+    CHECK(edge_count == 2);
+    CHECK(edges[0].reference_pts == 97 && fabs(edges[0].motion.dx - 6.0) < 1e-9);
+    CHECK(edges[1].reference_pts == 102 && fabs(edges[1].motion.dx + 4.0) < 1e-9);
+    CHECK(fabs(edges[0].motion.dy + 3.0) < 1e-9);
+    CHECK(fabs(edges[1].motion.dy - 2.0) < 1e-9);
+    free(edges);
+    return 0;
+}
+
+static int test_exact_edges_keep_reference_fields_separate(void) {
+    MvstabVector vectors[32];
+    MvstabEstimatorConfig config = mvstab_default_estimator_config();
+    MvstabFrame frame;
+    MvstabMotionEdge *edges = NULL;
+    size_t edge_count = 0;
+    for (int index = 0; index < 16; ++index) {
+        set_vector(&vectors[index], index * 2, 2.0, 0.0, -1);
+        set_exact_timing(&vectors[index], -1.0 / 30.0);
+        vectors[index].reference_pts_delta = -1;
+        vectors[index].reference_top_field = 1;
+        set_vector(&vectors[index + 16], index * 2, 4.0, 0.0, -1);
+        set_exact_timing(&vectors[index + 16], -1.0 / 30.0);
+        vectors[index + 16].reference_pts_delta = -1;
+        vectors[index + 16].reference_bottom_field = 1;
+    }
+    frame = make_frame(vectors, 32);
+    frame.pts = 100;
+    CHECK(mvstab_estimate_frame_edges(&frame, &config, &edges, &edge_count) == 0);
+    CHECK(edge_count == 2);
+    CHECK(fabs(edges[0].motion.dx + edges[1].motion.dx - 6.0) < 1e-9);
+    CHECK(fabs(edges[0].motion.dx - edges[1].motion.dx) > 1.0);
+    free(edges);
+    return 0;
+}
+
 static int test_similarity_fit_separates_scale_and_rotation(void) {
     MvstabVector vectors[32];
     MvstabEstimatorConfig config = mvstab_default_estimator_config();
@@ -300,6 +354,8 @@ int main(void) {
         test_all_mvs_rejects_reference_disagreement() != 0 ||
         test_all_mvs_needs_a_supported_reference() != 0 ||
         test_exact_timing_unifies_distant_references() != 0 ||
+        test_exact_edges_preserve_reference_motion() != 0 ||
+        test_exact_edges_keep_reference_fields_separate() != 0 ||
         test_similarity_fit_separates_scale_and_rotation() != 0) {
         return 1;
     }
