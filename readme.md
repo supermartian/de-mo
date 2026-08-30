@@ -7,10 +7,16 @@ the final render pass.
 
 ## Showcase
 
-![Original video compared with mvstab and vid.stab](assets/mvstab-showcase.gif)
+<video
+  src="https://github.com/supermartian/de-mo/raw/refs/heads/main/mvstab-comparison.mp4"
+  controls
+  width="720">
+</video>
+
+[Open the comparison video directly](mvstab-comparison.mp4)
 
 The top panel is the original H.264 video. The lower panels show the same
-eight-second interval stabilized by mvstab (left) and pixel-domain vid.stab
+full-length sequence stabilized by mvstab (left) and pixel-domain vid.stab
 (right).
 
 The repository includes:
