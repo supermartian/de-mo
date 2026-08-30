@@ -13,6 +13,7 @@ typedef struct {
     int height;
     double frame_rate;
     double duration_seconds;
+    int metadata_only_decode;
 } MvstabVideoInfo;
 
 typedef int (*MvstabFrameCallback)(const MvstabFrame *frame, void *opaque);

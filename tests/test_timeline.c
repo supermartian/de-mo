@@ -205,6 +205,62 @@ static int test_all_mvs_does_not_repair_rejected_frames(void) {
     return 0;
 }
 
+static int test_exact_timing_uses_b_frames_and_repairs_keyframe(void) {
+    MvstabTimelineFrame frames[4];
+    initialize_frame(&frames[0], MVSTAB_PICTURE_B, 0);
+    initialize_frame(&frames[1], MVSTAB_PICTURE_B, 0);
+    initialize_frame(&frames[2], MVSTAB_PICTURE_I, 1);
+    initialize_frame(&frames[3], MVSTAB_PICTURE_B, 0);
+    for (int index = 0; index < 4; ++index) {
+        frames[index].pts_seconds = index / 30.0;
+        if (index != 2) {
+            frames[index].measured.valid = 1;
+            frames[index].measured.temporal_normalized = 1;
+            frames[index].measured.dx = 2.0;
+            frames[index].measured.theta = 0.01;
+        }
+    }
+    mvstab_build_timeline(frames, 4, MVSTAB_MODE_SAFE);
+    CHECK(frames[0].output.dx == 0.0);
+    CHECK(fabs(frames[1].output.dx - 2.0) < 1e-9);
+    CHECK(fabs(frames[2].output.dx - 2.0) < 1e-9);
+    CHECK(fabs(frames[2].output.theta - 0.01) < 1e-9);
+    CHECK(frames[2].output.interpolated);
+    CHECK(fabs(frames[3].output.dx - 2.0) < 1e-9);
+    return 0;
+}
+
+static int test_exact_timeline_rejects_legacy_measurement(void) {
+    MvstabTimelineFrame frames[5];
+    for (int index = 0; index < 5; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_B, 0);
+        frames[index].pts_seconds = index / 30.0;
+        frames[index].measured.valid = 1;
+        frames[index].measured.dx = 2.0;
+        frames[index].measured.temporal_normalized = index != 2;
+    }
+    frames[2].measured.dx = 100.0;
+    mvstab_build_timeline(frames, 5, MVSTAB_MODE_SAFE);
+    CHECK(frames[2].output.interpolated);
+    CHECK(fabs(frames[2].output.dx - 2.0) < 1e-9);
+    return 0;
+}
+
+static int test_invalid_exact_measurement_does_not_select_precise_mode(void) {
+    MvstabTimelineFrame frames[3];
+    for (int index = 0; index < 3; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_P, 0);
+        frames[index].pts_seconds = index / 30.0;
+    }
+    frames[1].measured.temporal_normalized = 1;
+    frames[2].measured.valid = 1;
+    frames[2].measured.dx = 4.0;
+    mvstab_build_timeline(frames, 3, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[2].output.dx - 4.0) < 1e-9);
+    CHECK(!frames[2].output.interpolated);
+    return 0;
+}
+
 int main(void) {
     if (test_safe_mode_distributes_anchor_motion() != 0 ||
         test_invalid_p_frame_advances_anchor() != 0) {
@@ -227,5 +283,14 @@ int main(void) {
         test_keyframe_fill_stops_at_rejected_p_frame() != 0) {
         return 1;
     }
-    return test_all_mvs_does_not_repair_rejected_frames();
+    if (test_all_mvs_does_not_repair_rejected_frames() != 0) {
+        return 1;
+    }
+    if (test_exact_timing_uses_b_frames_and_repairs_keyframe() != 0) {
+        return 1;
+    }
+    if (test_exact_timeline_rejects_legacy_measurement() != 0) {
+        return 1;
+    }
+    return test_invalid_exact_measurement_does_not_select_precise_mode();
 }

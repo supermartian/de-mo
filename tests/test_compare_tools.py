@@ -12,18 +12,20 @@ from compare_vidstab import (  # noqa: E402
 class CompareToolsTest(unittest.TestCase):
     def test_sign_alignment_and_metrics(self):
         codec = [
-            {"frame": 0, "dx": -1.0, "dy": 2.0, "confidence": 0.9},
-            {"frame": 1, "dx": -2.0, "dy": 3.0, "confidence": 0.4},
-            {"frame": 2, "dx": -3.0, "dy": 4.0, "confidence": 0.99},
+            {"frame": 0, "dx": -1.0, "dy": 2.0, "theta": 0.1, "confidence": 0.9},
+            {"frame": 1, "dx": -2.0, "dy": 3.0, "theta": 0.2, "confidence": 0.4},
+            {"frame": 2, "dx": -3.0, "dy": 4.0, "theta": 0.3, "confidence": 0.99},
         ]
         reference = [
-            {"frame": 0, "dx": 1.0, "dy": -2.0},
-            {"frame": 1, "dx": 2.0, "dy": -3.0},
-            {"frame": 2, "dx": 3.0, "dy": -4.0},
+            {"frame": 0, "dx": 1.0, "dy": -2.0, "theta": -0.1},
+            {"frame": 1, "dx": 2.0, "dy": -3.0, "theta": -0.2},
+            {"frame": 2, "dx": 3.0, "dy": -4.0, "theta": -0.3},
         ]
         result = compare(codec, reference)
         self.assertEqual(result["sign"], -1.0)
         self.assertEqual(result["rmse"], 0.0)
+        self.assertEqual(result["theta_sign"], -1.0)
+        self.assertEqual(result["theta_rmse"], 0.0)
         self.assertEqual(result["confidence"][0.8]["rmse"], 0.0)
 
     def test_percentile_interpolates(self):

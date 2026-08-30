@@ -42,6 +42,11 @@ static int write_json_vector(
         "\"src_x\":%d,\"src_y\":%d,\"block_w\":%d,\"block_h\":%d,"
         "\"motion_x\":%d,\"motion_y\":%d,\"motion_scale\":%u,"
         "\"mv_ref_to_cur_x\":%s,\"mv_ref_to_cur_y\":%s,"
+        "\"reference_poc_delta\":%" PRId32 ",\"reference_index\":%d,"
+        "\"reference_list\":%d,\"reference_exact\":%s,"
+        "\"reference_pts_delta\":%" PRId64 ",\"reference_delta_seconds\":%.9f,"
+        "\"long_term\":%s,\"top_field\":%s,\"bottom_field\":%s,"
+        "\"direct\":%s,\"skip\":%s,\"interlaced\":%s,"
         "\"flags\":\"0x%" PRIx64 "\"}",
         writer->first_json_item ? "" : ",\n",
         frame->display_index, pts,
@@ -49,7 +54,16 @@ static int write_json_vector(
         vector->destination_x, vector->destination_y,
         vector->source_x, vector->source_y, vector->width, vector->height,
         vector->motion_x, vector->motion_y, vector->motion_scale,
-        dx, dy, vector->codec_flags);
+        dx, dy, vector->reference_poc_delta, vector->reference_index,
+        vector->reference_list, vector->reference_exact ? "true" : "false",
+        vector->reference_pts_delta, vector->reference_delta_seconds,
+        vector->reference_long_term ? "true" : "false",
+        vector->reference_top_field ? "true" : "false",
+        vector->reference_bottom_field ? "true" : "false",
+        vector->prediction_direct ? "true" : "false",
+        vector->prediction_skip ? "true" : "false",
+        vector->prediction_interlaced ? "true" : "false",
+        vector->codec_flags);
     writer->first_json_item = 0;
     return written < 0 ? -1 : 0;
 }
@@ -64,15 +78,18 @@ static int write_stats_json_row(
     format_json_double(frame->pts_seconds, pts, sizeof(pts));
     return fprintf(file,
         "%s{\"frame_index\":%" PRId64 ",\"pts_seconds\":%s,\"pict_type\":\"%s\","
-        "\"dx\":%.9f,\"dy\":%.9f,\"theta\":%.9f,\"confidence\":%.6f,"
+        "\"dx\":%.9f,\"dy\":%.9f,\"theta\":%.9f,\"scale\":%.9f,"
+        "\"confidence\":%.6f,"
         "\"inlier_weight_ratio\":%.6f,\"residual_median\":%.9f,"
         "\"residual_p95\":%.9f,\"spatial_coverage\":%.6f,\"vector_count\":%d,"
         "\"inlier_count\":%d,\"valid\":%s,\"key_frame\":%s,\"scene_cut\":%s,"
         "\"interpolated\":%s,\"measured_dx\":%.9f,\"measured_dy\":%.9f,"
-        "\"measured_valid\":%s,\"reference_agreement\":%.6f}",
+        "\"measured_valid\":%s,\"reference_agreement\":%.6f,"
+        "\"temporal_normalized\":%s}",
         first ? "" : ",\n", frame->frame_index, pts,
         mvstab_picture_type_name(frame->picture_type),
-        motion->dx, motion->dy, motion->theta, motion->confidence,
+        motion->dx, motion->dy, motion->theta, motion->scale,
+        motion->confidence,
         motion->inlier_weight_ratio, motion->residual_median, motion->residual_p95,
         motion->spatial_coverage, motion->vector_count, motion->inlier_count,
         motion->valid ? "true" : "false", frame->key_frame ? "true" : "false",
@@ -80,7 +97,8 @@ static int write_stats_json_row(
         motion->interpolated ? "true" : "false",
         frame->measured.dx, frame->measured.dy,
         frame->measured.valid ? "true" : "false",
-        motion->reference_agreement) < 0 ? -1 : 0;
+        motion->reference_agreement,
+        motion->temporal_normalized ? "true" : "false") < 0 ? -1 : 0;
 }
 
 static int write_stats_json_file(

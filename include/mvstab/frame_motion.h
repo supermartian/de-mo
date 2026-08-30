@@ -18,6 +18,7 @@ typedef struct {
     int64_t display_index;
     int64_t pts;
     double pts_seconds;
+    double duration_seconds;
     MvstabPictureType picture_type;
     int key_frame;
     int width;
@@ -30,6 +31,7 @@ typedef struct {
     double dx;
     double dy;
     double theta;
+    double scale;
     double confidence;
     double inlier_weight_ratio;
     double residual_median;
@@ -41,6 +43,7 @@ typedef struct {
     int valid;
     int scene_cut;
     int interpolated;
+    int temporal_normalized;
 } FrameMotion;
 
 const char *mvstab_picture_type_name(MvstabPictureType picture_type);

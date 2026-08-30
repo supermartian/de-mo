@@ -2,6 +2,7 @@
 #include "mvstab/frame_motion.h"
 
 #include <stddef.h>
+#include <string.h>
 
 int mvstab_normalize_vector(
     MvstabVector *vector,
@@ -21,6 +22,7 @@ int mvstab_normalize_vector(
         return -1;
     }
 
+    memset(vector, 0, sizeof(*vector));
     vector->x = destination_x;
     vector->y = destination_y;
     vector->dx = -(double)motion_x / motion_scale;

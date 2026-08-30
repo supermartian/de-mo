@@ -26,6 +26,7 @@ def read_codec_csv(path):
                 "frame": int(row["frame_index"]),
                 "dx": finite_float(row["dx"], "dx", row_number),
                 "dy": finite_float(row["dy"], "dy", row_number),
+                "theta": finite_float(row.get("theta", 0.0), "theta", row_number),
                 "confidence": finite_float(
                     row.get("confidence", 1.0), "confidence", row_number),
                 "residual": finite_float(
@@ -53,6 +54,8 @@ def read_reference(path):
         records.append({"frame": frame,
                         "dx": finite_float(fields[1], "dx", frame + 1),
                         "dy": finite_float(fields[2], "dy", frame + 1),
+                        "theta": finite_float(fields[3], "theta", frame + 1)
+                        if len(fields) > 3 else 0.0,
                         "confidence": 1.0, "residual": 0.0, "pts": None})
     return records
 
@@ -171,7 +174,7 @@ def spectral_band_energy(dx_values, dy_values, low=0.1, high=0.5):
 
 def validate_records(records, label):
     for index, item in enumerate(records):
-        for field in ("dx", "dy", "confidence", "residual"):
+        for field in ("dx", "dy", "theta", "confidence", "residual"):
             value = item.get(field, 1.0 if field == "confidence" else 0.0)
             if not math.isfinite(value):
                 raise ValueError(f"non-finite {label} {field} at record {index}")
@@ -230,6 +233,19 @@ def compare(codec, reference):
         [sign * item["dx"] for item in codec], [item["dx"] for item in reference])
     result["pearson_dy"] = pearson(
         [sign * item["dy"] for item in codec], [item["dy"] for item in reference])
+    theta_positive = [item.get("theta", 0.0) - target.get("theta", 0.0)
+                      for item, target in zip(codec, reference)]
+    theta_negative = [-item.get("theta", 0.0) - target.get("theta", 0.0)
+                      for item, target in zip(codec, reference)]
+    theta_sign = (1.0 if sum(value * value for value in theta_positive) <=
+                  sum(value * value for value in theta_negative) else -1.0)
+    theta_error = (theta_positive if theta_sign > 0.0 else theta_negative)
+    result["theta_sign"] = theta_sign
+    result["pearson_theta"] = pearson(
+        [theta_sign * item.get("theta", 0.0) for item in codec],
+        [item.get("theta", 0.0) for item in reference])
+    result["theta_rmse"] = math.sqrt(
+        sum(value * value for value in theta_error) / len(theta_error))
     result["confidence"] = {}
     for threshold in (0.5, 0.8, 0.95):
         selected = [index for index, item in enumerate(codec)
@@ -249,6 +265,9 @@ def print_report(result):
     print(f"aligned codec sign: {result['sign']:+.0f}")
     print(f"pearson dx: {result['pearson_dx']:.6f}")
     print(f"pearson dy: {result['pearson_dy']:.6f}")
+    print(f"aligned theta sign: {result['theta_sign']:+.0f}")
+    print(f"pearson theta: {result['pearson_theta']:.6f}")
+    print(f"theta_rmse: {result['theta_rmse']:.6f}")
     for name in ("median_absolute_error", "rmse", "p90", "p95", "p99",
                  "derivative_rmse", "acceleration_rmse", "jitter_band_energy"):
         print(f"{name}: {result[name]:.6f}")

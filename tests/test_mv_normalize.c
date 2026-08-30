@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "mvstab/motion_vector.h"
 
@@ -18,6 +19,7 @@ static int nearly_equal(double left, double right) {
 
 static int test_reference_to_current_sign(void) {
     MvstabVector vector;
+    memset(&vector, 0xff, sizeof(vector));
     int result = mvstab_normalize_vector(
         &vector, 90, 57, 100, 50, 16, 8, -40, 28, 4, -1, UINT64_C(3));
 
@@ -27,6 +29,9 @@ static int test_reference_to_current_sign(void) {
     CHECK(nearly_equal(vector.weight, 128.0));
     CHECK(vector.reference_direction == -1);
     CHECK(vector.codec_flags == UINT64_C(3));
+    CHECK(vector.reference_exact == 0);
+    CHECK(vector.reference_pts_valid == 0);
+    CHECK(vector.reference_delta_seconds == 0.0);
     return 0;
 }
 

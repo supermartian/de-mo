@@ -45,9 +45,10 @@ static int test_transform_format(void) {
     memset(&frame, 0, sizeof(frame));
     frame.output.dx = 2.5;
     frame.output.dy = -1.25;
+    frame.output.theta = 0.125;
     CHECK(mvstab_write_transform_file(path, &frame, 1, error, sizeof(error)) == 0);
     CHECK(read_first_line(path, line, sizeof(line)) == 0);
-    CHECK(strcmp(line, "0 -2.500000000 1.250000000 0.000000000 0.000000000 0\n") == 0);
+    CHECK(strcmp(line, "0 -2.500000000 1.250000000 0.125000000 0.000000000 0\n") == 0);
     CHECK(remove(path) == 0);
     return 0;
 }
@@ -72,6 +73,7 @@ static int test_json_dump_handles_missing_pts(void) {
     CHECK(mvstab_raw_writer_close(&writer) == 0);
     CHECK(read_file(path, contents, sizeof(contents)) == 0);
     CHECK(strstr(contents, "\"pts_seconds\":null") != NULL);
+    CHECK(strstr(contents, "\"reference_exact\":false") != NULL);
     CHECK(remove(path) == 0);
     return 0;
 }

@@ -38,6 +38,18 @@ printf 'sentinel\n' >"$test_directory/vectors.json"
 "$mvstab_binary" dump "$test_directory/input.mp4" \
     --format json -o "$test_directory/vectors.json"
 grep '^\[' "$test_directory/vectors.json" >/dev/null
+"$mvstab_binary" inspect "$test_directory/input.mp4" \
+    >"$test_directory/inspection.txt"
+metadata_only=0
+if grep 'motion metadata only' "$test_directory/inspection.txt" >/dev/null; then
+    metadata_only=1
+    grep '"reference_exact":true' "$test_directory/vectors.json" >/dev/null
+    grep '"reference_pts_delta":' "$test_directory/vectors.json" >/dev/null
+fi
+if [[ ${MVSTAB_REQUIRE_EXACT_METADATA:-0} == 1 && $metadata_only != 1 ]]; then
+    echo "patched FFmpeg metadata-only path was required but not selected" >&2
+    exit 1
+fi
 if compgen -G "$test_directory/vectors.json.mvstab-tmp-*" >/dev/null; then
     exit 1
 fi
@@ -79,10 +91,13 @@ fi
     --mode safe --min-confidence 0.01 \
     -o "$test_directory/motion.trf" --stats "$test_directory/motion.csv"
 
-awk -F, 'NR == 3 {exit !($4 == -2 && $5 == -1 && $14 == 1)}' \
+awk -F, 'NR == 3 {dx=$4+2; dy=$5+1; exit !(dx*dx < 0.0001 && dy*dy < 0.0001 && $15 == 1)}' \
     "$test_directory/motion.csv"
-awk -F, 'NR == 12 {exit !($3 == "I" && $4 == -2 && $5 == -1 && $17 == 1)}' \
+awk -F, 'NR == 12 {dx=$4+2; dy=$5+1; exit !($3 == "I" && dx*dx < 0.0001 && dy*dy < 0.0001 && $18 == 1)}' \
     "$test_directory/motion.csv"
+if [[ $metadata_only == 1 ]]; then
+    awk -F, 'NR == 3 {exit !($23 == 1)}' "$test_directory/motion.csv"
+fi
 
 ffmpeg -hide_banner -loglevel error -i "$test_directory/input.mp4" \
     -vf "vidstabtransform=input=$test_directory/motion.trf:relative=1:smoothing=0:maxangle=0:optzoom=0" \

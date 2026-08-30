@@ -8,6 +8,8 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 include(CTest)
 option(MVSTAB_BUILD_CLI "Build the FFmpeg-backed command-line application" ON)
+option(MVSTAB_REQUIRE_EXACT_METADATA_TESTS
+       "Require the patched H.264 metadata path in end-to-end tests" OFF)
 
 add_library(mvstab_core
     src/confidence.c
@@ -106,6 +108,14 @@ if(BUILD_TESTING)
     endif()
 
     find_program(MVSTAB_BASH_EXECUTABLE bash)
+    if(MVSTAB_BASH_EXECUTABLE)
+        add_test(
+            NAME build_helper_guards
+            COMMAND ${MVSTAB_BASH_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build_helper.sh
+                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_patched_ffmpeg.sh
+        )
+    endif()
     if(MVSTAB_BUILD_CLI AND MVSTAB_BASH_EXECUTABLE)
         add_test(
             NAME end_to_end
@@ -114,5 +124,9 @@ if(BUILD_TESTING)
                     $<TARGET_FILE:mvstab>
         )
         set_tests_properties(end_to_end PROPERTIES SKIP_RETURN_CODE 77)
+        if(MVSTAB_REQUIRE_EXACT_METADATA_TESTS)
+            set_tests_properties(end_to_end PROPERTIES
+                ENVIRONMENT "MVSTAB_REQUIRE_EXACT_METADATA=1")
+        endif()
     endif()
 endif()

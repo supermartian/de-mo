@@ -19,6 +19,19 @@ typedef struct {
     int motion_y;
     unsigned int motion_scale;
     int reference_direction;
+    int reference_exact;
+    int reference_index;
+    int reference_list;
+    int reference_long_term;
+    int reference_top_field;
+    int reference_bottom_field;
+    int prediction_direct;
+    int prediction_skip;
+    int prediction_interlaced;
+    int reference_pts_valid;
+    int32_t reference_poc_delta;
+    int64_t reference_pts_delta;
+    double reference_delta_seconds;
     uint64_t codec_flags;
 } MvstabVector;
 

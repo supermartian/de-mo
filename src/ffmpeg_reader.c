@@ -11,7 +11,9 @@
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/motion_vector.h>
+#include <libavutil/opt.h>
 
+#include "ffmpeg_motion_metadata.h"
 #include "mvstab/motion_vector.h"
 
 typedef struct {
@@ -22,6 +24,9 @@ typedef struct {
     AVStream *stream;
     int stream_index;
     int64_t frame_index;
+    double previous_pts_seconds;
+    double nominal_duration_seconds;
+    int metadata_only_decode;
     MvstabFrameCallback callback;
     void *opaque;
     char *error;
@@ -78,11 +83,19 @@ static int open_input(Reader *reader, const char *path) {
         set_av_error(reader, "cannot copy codec parameters", result);
         return -1;
     }
+    reader->decoder->pkt_timebase = reader->stream->time_base;
     result = av_dict_set(&options, "flags2", "+export_mvs", 0);
     if (result < 0) {
         set_av_error(reader, "cannot request exported motion vectors", result);
         av_dict_free(&options);
         return -1;
+    }
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+    reader->decoder->export_side_data |= AV_CODEC_EXPORT_DATA_MVS;
+#endif
+    if (reader->stream->codecpar->codec_id == AV_CODEC_ID_H264 &&
+        av_opt_set(reader->decoder->priv_data, "motion_metadata_only", "1", 0) >= 0) {
+        reader->metadata_only_decode = 1;
     }
     result = avcodec_open2(reader->decoder, codec, &options);
     av_dict_free(&options);
@@ -91,6 +104,43 @@ static int open_input(Reader *reader, const char *path) {
         return -1;
     }
     return 0;
+}
+
+static int64_t motion_pts_delta(uint64_t flags) {
+    uint64_t raw = (flags >> MVSTAB_AV_MV_PTS_DELTA_SHIFT) &
+                   MVSTAB_AV_MV_PTS_DELTA_MASK;
+    if (raw & (UINT64_C(1) << 47)) {
+        raw |= ~MVSTAB_AV_MV_PTS_DELTA_MASK;
+    }
+    return (int64_t)raw;
+}
+
+static void copy_reference_metadata(
+    MvstabVector *output,
+    const AVMotionVector *input,
+    double time_base
+) {
+    uint64_t flags = input->flags;
+    output->reference_exact = !!(flags & MVSTAB_AV_MV_REFERENCE_EXACT);
+    output->reference_poc_delta = input->source;
+    if (!output->reference_exact) {
+        return;
+    }
+    output->reference_index = flags & MVSTAB_AV_MV_REFERENCE_INDEX_MASK;
+    output->reference_list = !!(flags & MVSTAB_AV_MV_REFERENCE_LIST1);
+    output->reference_long_term = !!(flags & MVSTAB_AV_MV_LONG_REFERENCE);
+    output->reference_top_field = !!(flags & MVSTAB_AV_MV_REFERENCE_TOP_FIELD);
+    output->reference_bottom_field = !!(flags & MVSTAB_AV_MV_REFERENCE_BOTTOM_FIELD);
+    output->prediction_direct = !!(flags & MVSTAB_AV_MV_DIRECT);
+    output->prediction_skip = !!(flags & MVSTAB_AV_MV_SKIP);
+    output->prediction_interlaced = !!(flags & MVSTAB_AV_MV_INTERLACED);
+    output->reference_pts_valid = !!(flags & MVSTAB_AV_MV_PTS_DELTA_VALID);
+    if (output->reference_pts_valid) {
+        output->reference_pts_delta = motion_pts_delta(flags);
+        output->reference_delta_seconds = output->reference_pts_delta * time_base;
+        output->reference_direction =
+            (output->reference_pts_delta > 0) - (output->reference_pts_delta < 0);
+    }
 }
 
 static MvstabPictureType convert_picture_type(enum AVPictureType picture_type) {
@@ -106,7 +156,11 @@ static MvstabPictureType convert_picture_type(enum AVPictureType picture_type) {
     return MVSTAB_PICTURE_UNKNOWN;
 }
 
-static size_t copy_motion_vectors(const AVFrame *frame, MvstabVector **output) {
+static size_t copy_motion_vectors(
+    const Reader *reader,
+    const AVFrame *frame,
+    MvstabVector **output
+) {
     AVFrameSideData *side_data = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);
     const AVMotionVector *source;
     MvstabVector *vectors;
@@ -132,6 +186,10 @@ static size_t copy_motion_vectors(const AVFrame *frame, MvstabVector **output) {
             source[index].w, source[index].h,
             source[index].motion_x, source[index].motion_y,
             source[index].motion_scale, direction, source[index].flags);
+        if (result == 0) {
+            copy_reference_metadata(&vectors[accepted], &source[index],
+                                    av_q2d(reader->stream->time_base));
+        }
         accepted += result == 0;
     }
     *output = vectors;
@@ -140,7 +198,7 @@ static size_t copy_motion_vectors(const AVFrame *frame, MvstabVector **output) {
 
 static int emit_frame(Reader *reader) {
     MvstabVector *vectors;
-    size_t vector_count = copy_motion_vectors(reader->frame, &vectors);
+    size_t vector_count = copy_motion_vectors(reader, reader->frame, &vectors);
     int64_t pts = reader->frame->best_effort_timestamp;
     MvstabFrame frame;
     int result;
@@ -153,13 +211,23 @@ static int emit_frame(Reader *reader) {
     frame.display_index = reader->frame_index++;
     frame.pts = pts;
     frame.pts_seconds = pts == AV_NOPTS_VALUE ? NAN : pts * av_q2d(reader->stream->time_base);
+    frame.duration_seconds = reader->nominal_duration_seconds;
+    if (isfinite(frame.pts_seconds) && isfinite(reader->previous_pts_seconds) &&
+        frame.pts_seconds > reader->previous_pts_seconds) {
+        frame.duration_seconds = frame.pts_seconds - reader->previous_pts_seconds;
+    }
     frame.picture_type = convert_picture_type(reader->frame->pict_type);
+#if LIBAVUTIL_VERSION_MAJOR >= 58
+    frame.key_frame = !!(reader->frame->flags & AV_FRAME_FLAG_KEY);
+#else
     frame.key_frame = reader->frame->key_frame;
+#endif
     frame.width = reader->frame->width;
     frame.height = reader->frame->height;
     frame.vectors = vectors;
     frame.vector_count = vector_count;
     result = reader->callback(&frame, reader->opaque);
+    reader->previous_pts_seconds = frame.pts_seconds;
     free(vectors);
     if (result != 0 && reader->error[0] == '\0') {
         snprintf(reader->error, reader->error_size, "frame callback failed at frame %lld",
@@ -228,6 +296,7 @@ static void populate_video_info(const Reader *reader, MvstabVideoInfo *info) {
     info->width = reader->decoder->width;
     info->height = reader->decoder->height;
     info->frame_rate = rate.den == 0 ? 0.0 : av_q2d(rate);
+    info->metadata_only_decode = reader->metadata_only_decode;
     if (reader->stream->duration != AV_NOPTS_VALUE) {
         info->duration_seconds = reader->stream->duration * av_q2d(reader->stream->time_base);
     } else if (reader->format->duration != AV_NOPTS_VALUE) {
@@ -246,6 +315,7 @@ int mvstab_read_video(
     size_t error_size
 ) {
     Reader reader = {.callback = callback, .opaque = opaque,
+                     .previous_pts_seconds = NAN,
                      .error = error, .error_size = error_size};
     int result = -1;
 
@@ -268,6 +338,8 @@ int mvstab_read_video(
         snprintf(error, error_size, "cannot allocate decode buffers");
     } else {
         populate_video_info(&reader, info);
+        reader.nominal_duration_seconds = info->frame_rate > 0.0 ?
+                                          1.0 / info->frame_rate : NAN;
         result = decode_video(&reader);
     }
     close_reader(&reader);

@@ -51,6 +51,8 @@ static void distribute_anchor(
         }
         divided.dx = frames[anchor].measured.dx * fraction;
         divided.dy = frames[anchor].measured.dy * fraction;
+        divided.theta = frames[anchor].measured.theta * fraction;
+        divided.scale = frames[anchor].measured.scale * fraction;
         frames[index].output = divided;
     }
 }
@@ -157,6 +159,8 @@ static FrameMotion interpolate_gap_motion(
         motion.dx = a->dx + alpha * (b->dx - a->dx);
         motion.dy = a->dy + alpha * (b->dy - a->dy);
     }
+    motion.theta = a->theta + alpha * (b->theta - a->theta);
+    motion.scale = a->scale + alpha * (b->scale - a->scale);
     motion.confidence = fmin(a->confidence, b->confidence);
     motion.valid = 1;
     motion.scene_cut = 0;
@@ -210,6 +214,56 @@ static void fill_keyframe_motion(
     }
 }
 
+static int has_temporally_normalized_motion(
+    const MvstabTimelineFrame *frames,
+    size_t frame_count
+) {
+    for (size_t index = 0; index < frame_count; ++index) {
+        if (frames[index].measured.valid &&
+            frames[index].measured.temporal_normalized) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int precise_measurement_is_valid(const MvstabTimelineFrame *frame) {
+    return frame->measured.valid && frame->measured.temporal_normalized;
+}
+
+static void build_precise_timeline(
+    MvstabTimelineFrame *frames,
+    size_t frame_count
+) {
+    for (size_t index = 0; index < frame_count; ++index) {
+        if (index == 0 || !precise_measurement_is_valid(&frames[index])) {
+            frames[index].output = identity_motion(0);
+        } else {
+            frames[index].output = frames[index].measured;
+        }
+    }
+    for (size_t start = 1; start + 1 < frame_count;) {
+        size_t right = start;
+        if (precise_measurement_is_valid(&frames[start])) {
+            ++start;
+            continue;
+        }
+        while (right < frame_count &&
+               !precise_measurement_is_valid(&frames[right])) {
+            ++right;
+        }
+        if (right < frame_count && right - start <= 3 &&
+            precise_measurement_is_valid(&frames[start - 1]) &&
+            motions_are_continuous(frames, start - 1, right)) {
+            for (size_t index = start; index < right; ++index) {
+                frames[index].output = interpolate_gap_motion(
+                    frames, index, start - 1, 1, right, 1);
+            }
+        }
+        start = right;
+    }
+}
+
 void mvstab_build_timeline(
     MvstabTimelineFrame *frames,
     size_t frame_count,
@@ -220,7 +274,9 @@ void mvstab_build_timeline(
     if (frames == NULL || frame_count == 0) {
         return;
     }
-    if (mode == MVSTAB_MODE_SAFE) {
+    if (has_temporally_normalized_motion(frames, frame_count)) {
+        build_precise_timeline(frames, frame_count);
+    } else if (mode == MVSTAB_MODE_SAFE) {
         build_safe_timeline(frames, frame_count);
     } else {
         for (index = 0; index < frame_count; ++index) {
@@ -231,7 +287,8 @@ void mvstab_build_timeline(
             }
         }
     }
-    if (mode == MVSTAB_MODE_SAFE) {
+    if (mode == MVSTAB_MODE_SAFE &&
+        !has_temporally_normalized_motion(frames, frame_count)) {
         fill_keyframe_motion(frames, frame_count);
     }
 }

@@ -7,7 +7,8 @@
 
 int mvstab_frame_motion_is_finite(const FrameMotion *motion) {
     return isfinite(motion->dx) && isfinite(motion->dy) &&
-           isfinite(motion->theta) && isfinite(motion->confidence) &&
+           isfinite(motion->theta) && isfinite(motion->scale) &&
+           isfinite(motion->confidence) &&
            isfinite(motion->inlier_weight_ratio) &&
            isfinite(motion->residual_median) && isfinite(motion->residual_p95) &&
            isfinite(motion->spatial_coverage) &&
@@ -38,8 +39,8 @@ int mvstab_write_transform_file(
     }
     for (index = 0; index < frame_count; ++index) {
         const FrameMotion *motion = &frames[index].output;
-        if (fprintf(file, "0 %.9f %.9f 0.000000000 0.000000000 0\n",
-                    -motion->dx, -motion->dy) < 0) {
+        if (fprintf(file, "0 %.9f %.9f %.9f 0.000000000 0\n",
+                    -motion->dx, -motion->dy, motion->theta) < 0) {
             snprintf(error, error_size, "cannot write transform file '%s'", path);
             fclose(file);
             return -1;

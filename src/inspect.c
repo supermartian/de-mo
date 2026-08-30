@@ -65,6 +65,12 @@ int mvstab_inspect_frame(const MvstabFrame *frame, void *opaque) {
         const MvstabVector *vector = &frame->vectors[index];
         state->past_vectors += vector->reference_direction < 0;
         state->future_vectors += vector->reference_direction > 0;
+        state->exact_vectors += vector->reference_exact;
+        state->timed_vectors += vector->reference_pts_valid;
+        state->list1_vectors += vector->reference_list == 1;
+        state->long_term_vectors += vector->reference_long_term;
+        state->direct_vectors += vector->prediction_direct;
+        state->skip_vectors += vector->prediction_skip;
         count_block(state, vector);
         append_magnitude(state, hypot(vector->dx, vector->dy));
     }
@@ -105,6 +111,8 @@ void mvstab_print_inspection(
            path, info->codec_name, info->profile_name, info->decoder_name);
     printf("Resolution:  %dx%d\nFrame rate:  %.3f fps\nDuration:    %.3f s\n\n",
            info->width, info->height, info->frame_rate, info->duration_seconds);
+    printf("Decode path: %s\n\n", info->metadata_only_decode ?
+           "H.264 syntax + motion metadata only" : "full software frame decode");
     printf("Frames:\n  I: %" PRId64 "\n  P: %" PRId64 "\n  B: %" PRId64 "\n\n",
            state->picture_counts[0], state->picture_counts[1], state->picture_counts[2]);
     printf("Motion vectors:\n  frames with MV side data: %" PRId64 " / %" PRId64 "\n",
@@ -112,6 +120,12 @@ void mvstab_print_inspection(
     printf("  total vectors:            %" PRId64 "\n", state->vector_count);
     printf("  past-reference vectors:   %" PRId64 "\n", state->past_vectors);
     printf("  future-reference vectors: %" PRId64 "\n\n", state->future_vectors);
+    printf("  exact-reference vectors:  %" PRId64 "\n", state->exact_vectors);
+    printf("  timestamped references:   %" PRId64 "\n", state->timed_vectors);
+    printf("  list-1 vectors:            %" PRId64 "\n", state->list1_vectors);
+    printf("  long-term references:      %" PRId64 "\n", state->long_term_vectors);
+    printf("  direct / skip vectors:     %" PRId64 " / %" PRId64 "\n\n",
+           state->direct_vectors, state->skip_vectors);
     printf("Block sizes:\n  4x4:   %5.1f%%\n  8x8:   %5.1f%%\n",
            block_percentage(state, 0), block_percentage(state, 1));
     printf("  16x16: %5.1f%%\n  other: %5.1f%%\n\n",

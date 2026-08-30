@@ -16,6 +16,12 @@ typedef struct {
     int64_t vector_count;
     int64_t past_vectors;
     int64_t future_vectors;
+    int64_t exact_vectors;
+    int64_t timed_vectors;
+    int64_t list1_vectors;
+    int64_t long_term_vectors;
+    int64_t direct_vectors;
+    int64_t skip_vectors;
     int64_t block_counts[4];
     uint64_t magnitude_bins[MVSTAB_MAGNITUDE_BIN_COUNT];
     uint64_t magnitude_count;

@@ -10,6 +10,7 @@ typedef struct {
     double dx;
     double dy;
     double weight;
+    double base_weight;
     double residual;
     int inlier;
 } MvstabCandidate;
