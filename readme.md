@@ -5,6 +5,14 @@ translation and rotation without inspecting reconstructed pixels. It emits a
 transform file for FFmpeg's `vidstabtransform`, so pixels are touched only in
 the final render pass.
 
+## Showcase
+
+![Original video compared with mvstab and vid.stab](assets/mvstab-showcase.gif)
+
+The top panel is the original H.264 video. The lower panels show the same
+eight-second interval stabilized by mvstab (left) and pixel-domain vid.stab
+(right).
+
 The repository includes:
 
 - a stock-FFmpeg fallback using `AV_FRAME_DATA_MOTION_VECTORS`;
