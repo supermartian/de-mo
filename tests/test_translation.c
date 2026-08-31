@@ -200,6 +200,8 @@ static int test_exact_edges_preserve_reference_motion(void) {
     CHECK(edges[1].reference_pts == 102 && fabs(edges[1].motion.dx + 4.0) < 1e-9);
     CHECK(fabs(edges[0].motion.dy + 3.0) < 1e-9);
     CHECK(fabs(edges[1].motion.dy - 2.0) < 1e-9);
+    CHECK(edges[0].cell_count > 0 && edges[1].cell_count > 0);
+    CHECK(edges[0].grid_columns == 8 && edges[0].grid_rows == 4);
     free(edges);
     return 0;
 }
@@ -253,6 +255,30 @@ static int test_similarity_fit_separates_scale_and_rotation(void) {
     return 0;
 }
 
+static int test_affine_nuisance_does_not_bias_similarity(void) {
+    MvstabVector vectors[32];
+    MvstabEstimatorConfig config = mvstab_default_estimator_config();
+    MvstabFrame frame = make_frame(vectors, 32);
+    FrameMotion motion;
+    const double dx = 2.0, dy = -1.0, scale = 0.01, theta = 0.005;
+    const double shear = 0.02, stretch = 0.015;
+    for (int index = 0; index < 32; ++index) {
+        double x;
+        double y;
+        set_vector(&vectors[index], index, 0.0, 0.0, -1);
+        x = vectors[index].x - frame.width / 2.0;
+        y = vectors[index].y - frame.height / 2.0;
+        vectors[index].dx = dx + (scale + stretch) * x + (shear - theta) * y;
+        vectors[index].dy = dy + (shear + theta) * x + (scale - stretch) * y;
+    }
+    CHECK(mvstab_estimate_frame(&frame, &config, &motion) == 0);
+    CHECK(motion.valid);
+    CHECK(fabs(motion.dx - dx) < 1e-9 && fabs(motion.dy - dy) < 1e-9);
+    CHECK(fabs(motion.scale - scale) < 1e-9);
+    CHECK(fabs(motion.theta - theta) < 1e-9);
+    return 0;
+}
+
 static int estimate_coverage(int spread, FrameMotion *motion) {
     MvstabVector vectors[16];
     MvstabEstimatorConfig config = mvstab_default_estimator_config();
@@ -294,6 +320,21 @@ static int test_adjacent_cells_are_not_global_support(void) {
     CHECK(mvstab_estimate_frame(&frame, &config, &motion) == 0);
     CHECK(!motion.valid);
     CHECK(motion.spatial_coverage == 0.0);
+    return 0;
+}
+
+static int test_temporal_grid_rejects_unsupported_size(void) {
+    MvstabVector vectors[16];
+    MvstabEstimatorConfig config = mvstab_default_estimator_config();
+    MvstabFrame frame;
+    FrameMotion motion;
+    for (int index = 0; index < 16; ++index) {
+        set_vector(&vectors[index], index, 1.0, 0.0, -1);
+    }
+    frame = make_frame(vectors, 16);
+    config.grid_columns = 9;
+    config.grid_rows = 8;
+    CHECK(mvstab_estimate_frame(&frame, &config, &motion) == -1);
     return 0;
 }
 
@@ -356,11 +397,13 @@ int main(void) {
         test_exact_timing_unifies_distant_references() != 0 ||
         test_exact_edges_preserve_reference_motion() != 0 ||
         test_exact_edges_keep_reference_fields_separate() != 0 ||
-        test_similarity_fit_separates_scale_and_rotation() != 0) {
+        test_similarity_fit_separates_scale_and_rotation() != 0 ||
+        test_affine_nuisance_does_not_bias_similarity() != 0) {
         return 1;
     }
     if (test_spatial_coverage_affects_confidence() != 0 ||
         test_adjacent_cells_are_not_global_support() != 0 ||
+        test_temporal_grid_rejects_unsupported_size() != 0 ||
         test_one_quadrant_is_not_global_support() != 0) {
         return 1;
     }

@@ -35,4 +35,9 @@ int mvstab_build_pose_graph_timeline(
     size_t frame_count
 );
 
+int mvstab_refit_motion_cells(
+    MvstabMotionEdge *edge,
+    const unsigned char *excluded
+);
+
 #endif

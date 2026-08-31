@@ -17,7 +17,7 @@ typedef struct {
     size_t edge_count;
 } MvstabTimelineFrame;
 
-void mvstab_build_timeline(
+int mvstab_build_timeline(
     MvstabTimelineFrame *frames,
     size_t frame_count,
     MvstabMode mode

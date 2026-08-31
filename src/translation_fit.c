@@ -7,9 +7,11 @@
 
 #include "internal.h"
 
+#define AFFINE_DIMENSIONS 6
+
 typedef struct {
-    double value[4];
-} SimilarityModel;
+    double value[AFFINE_DIMENSIONS];
+} AffineModel;
 
 static int compare_candidate_x(const void *left, const void *right) {
     const MvstabCandidate *a = left;
@@ -266,24 +268,28 @@ static double balance_grid_weights(
 }
 
 static void add_equation(
-    double normal[4][4],
-    double rhs[4],
-    const double row[4],
+    double normal[AFFINE_DIMENSIONS][AFFINE_DIMENSIONS],
+    double rhs[AFFINE_DIMENSIONS],
+    const double row[AFFINE_DIMENSIONS],
     double target,
     double weight
 ) {
-    for (int y = 0; y < 4; ++y) {
+    for (int y = 0; y < AFFINE_DIMENSIONS; ++y) {
         rhs[y] += weight * row[y] * target;
-        for (int x = 0; x < 4; ++x) {
+        for (int x = 0; x < AFFINE_DIMENSIONS; ++x) {
             normal[y][x] += weight * row[y] * row[x];
         }
     }
 }
 
-static int solve_system(double matrix[4][4], double rhs[4], double result[4]) {
-    for (int column = 0; column < 4; ++column) {
+static int solve_system(
+    double matrix[AFFINE_DIMENSIONS][AFFINE_DIMENSIONS],
+    double rhs[AFFINE_DIMENSIONS],
+    double result[AFFINE_DIMENSIONS]
+) {
+    for (int column = 0; column < AFFINE_DIMENSIONS; ++column) {
         int pivot = column;
-        for (int row = column + 1; row < 4; ++row) {
+        for (int row = column + 1; row < AFFINE_DIMENSIONS; ++row) {
             if (fabs(matrix[row][column]) > fabs(matrix[pivot][column])) {
                 pivot = row;
             }
@@ -292,24 +298,24 @@ static int solve_system(double matrix[4][4], double rhs[4], double result[4]) {
             return -1;
         }
         if (pivot != column) {
-            for (int x = column; x < 4; ++x) {
+            for (int x = column; x < AFFINE_DIMENSIONS; ++x) {
                 double swap = matrix[column][x];
                 matrix[column][x] = matrix[pivot][x];
                 matrix[pivot][x] = swap;
             }
             { double swap = rhs[column]; rhs[column] = rhs[pivot]; rhs[pivot] = swap; }
         }
-        for (int row = column + 1; row < 4; ++row) {
+        for (int row = column + 1; row < AFFINE_DIMENSIONS; ++row) {
             double factor = matrix[row][column] / matrix[column][column];
-            for (int x = column; x < 4; ++x) {
+            for (int x = column; x < AFFINE_DIMENSIONS; ++x) {
                 matrix[row][x] -= factor * matrix[column][x];
             }
             rhs[row] -= factor * rhs[column];
         }
     }
-    for (int row = 3; row >= 0; --row) {
+    for (int row = AFFINE_DIMENSIONS - 1; row >= 0; --row) {
         double value = rhs[row];
-        for (int x = row + 1; x < 4; ++x) {
+        for (int x = row + 1; x < AFFINE_DIMENSIONS; ++x) {
             value -= matrix[row][x] * result[x];
         }
         result[row] = value / matrix[row][row];
@@ -317,20 +323,20 @@ static int solve_system(double matrix[4][4], double rhs[4], double result[4]) {
     return 0;
 }
 
-static int fit_similarity(
+static int fit_affine(
     const MvstabFrame *frame,
     const MvstabCandidate *candidates,
     size_t count,
-    SimilarityModel *model
+    AffineModel *model
 ) {
-    double normal[4][4] = {{0}};
-    double rhs[4] = {0};
+    double normal[AFFINE_DIMENSIONS][AFFINE_DIMENSIONS] = {{0}};
+    double rhs[AFFINE_DIMENSIONS] = {0};
     double radius = fmax(frame->width, frame->height);
     for (size_t index = 0; index < count; ++index) {
         double u = (candidates[index].vector->x - frame->width / 2.0) / radius;
         double v = (candidates[index].vector->y - frame->height / 2.0) / radius;
-        const double x_row[4] = {1.0, 0.0, u, -v};
-        const double y_row[4] = {0.0, 1.0, v, u};
+        const double x_row[AFFINE_DIMENSIONS] = {1.0, 0.0, u, v, 0.0, 0.0};
+        const double y_row[AFFINE_DIMENSIONS] = {0.0, 1.0, 0.0, 0.0, u, v};
         add_equation(normal, rhs, x_row, candidates[index].dx,
                      candidates[index].weight);
         add_equation(normal, rhs, y_row, candidates[index].dy,
@@ -343,14 +349,14 @@ static void compute_residuals(
     const MvstabFrame *frame,
     MvstabCandidate *candidates,
     size_t count,
-    const SimilarityModel *model
+    const AffineModel *model
 ) {
     double radius = fmax(frame->width, frame->height);
     for (size_t index = 0; index < count; ++index) {
         double u = (candidates[index].vector->x - frame->width / 2.0) / radius;
         double v = (candidates[index].vector->y - frame->height / 2.0) / radius;
-        double dx = model->value[0] + model->value[2] * u - model->value[3] * v;
-        double dy = model->value[1] + model->value[3] * u + model->value[2] * v;
+        double dx = model->value[0] + model->value[2] * u + model->value[3] * v;
+        double dy = model->value[1] + model->value[4] * u + model->value[5] * v;
         candidates[index].residual = hypot(candidates[index].dx - dx,
                                             candidates[index].dy - dy);
     }
@@ -366,16 +372,16 @@ static double robust_threshold(
                 config->mad_threshold * candidates[count / 2].residual);
 }
 
-static int robust_similarity_fit(
+static int robust_affine_fit(
     const MvstabFrame *frame,
     const MvstabEstimatorConfig *config,
     MvstabCandidate *candidates,
     size_t count,
-    SimilarityModel *model,
+    AffineModel *model,
     double *threshold
 ) {
     for (int iteration = 0; iteration < 4; ++iteration) {
-        if (fit_similarity(frame, candidates, count, model) != 0) {
+        if (fit_affine(frame, candidates, count, model) != 0) {
             return -1;
         }
         compute_residuals(frame, candidates, count, model);
@@ -386,7 +392,7 @@ static int robust_similarity_fit(
             candidates[index].weight = candidates[index].base_weight * robust * robust;
         }
     }
-    if (fit_similarity(frame, candidates, count, model) != 0) {
+    if (fit_affine(frame, candidates, count, model) != 0) {
         return -1;
     }
     compute_residuals(frame, candidates, count, model);
@@ -394,11 +400,93 @@ static int robust_similarity_fit(
     return 0;
 }
 
+static int fit_motion_cells(
+    const MvstabMotionEdge *edge,
+    const unsigned char *excluded,
+    double model[AFFINE_DIMENSIONS]
+) {
+    double normal[AFFINE_DIMENSIONS][AFFINE_DIMENSIONS] = {{0}};
+    double rhs[AFFINE_DIMENSIONS] = {0};
+    size_t used = 0;
+    for (size_t index = 0; index < edge->cell_count; ++index) {
+        const MvstabMotionCell *cell = &edge->cells[index];
+        const double x_row[AFFINE_DIMENSIONS] = {
+            1.0, 0.0, cell->x, cell->y, 0.0, 0.0};
+        const double y_row[AFFINE_DIMENSIONS] = {
+            0.0, 1.0, 0.0, 0.0, cell->x, cell->y};
+        if (cell->grid_index >= MVSTAB_MAX_MOTION_CELLS ||
+            (excluded != NULL && excluded[cell->grid_index])) {
+            continue;
+        }
+        add_equation(normal, rhs, x_row, cell->dx, cell->weight);
+        add_equation(normal, rhs, y_row, cell->dy, cell->weight);
+        ++used;
+    }
+    return used >= 6 ? solve_system(normal, rhs, model) : -1;
+}
+
+static int compare_double(const void *left, const void *right) {
+    double a = *(const double *)left;
+    double b = *(const double *)right;
+    return (a > b) - (a < b);
+}
+
+static void update_refit_reliability(
+    MvstabMotionEdge *edge,
+    const unsigned char *excluded,
+    const double model[AFFINE_DIMENSIONS]
+) {
+    double residuals[MVSTAB_MAX_MOTION_CELLS];
+    double total_weight = 0.0;
+    double kept_weight = 0.0;
+    size_t used = 0;
+    int vectors = 0;
+    for (size_t index = 0; index < edge->cell_count; ++index) {
+        const MvstabMotionCell *cell = &edge->cells[index];
+        total_weight += cell->weight;
+        if (cell->grid_index >= MVSTAB_MAX_MOTION_CELLS ||
+            (excluded != NULL && excluded[cell->grid_index])) {
+            continue;
+        }
+        double predicted_x = model[0] + model[2] * cell->x + model[3] * cell->y;
+        double predicted_y = model[1] + model[4] * cell->x + model[5] * cell->y;
+        residuals[used++] = hypot(cell->dx - predicted_x, cell->dy - predicted_y);
+        kept_weight += cell->weight;
+        vectors += cell->vector_count;
+    }
+    qsort(residuals, used, sizeof(*residuals), compare_double);
+    double retained = total_weight > 0.0 ? kept_weight / total_weight : 0.0;
+    edge->motion.confidence *= retained;
+    edge->motion.inlier_weight_ratio *= retained;
+    edge->motion.spatial_coverage *= (double)used / edge->cell_count;
+    edge->motion.inlier_count = vectors;
+    edge->motion.residual_median = residuals[used / 2];
+    edge->motion.residual_p95 = residuals[(used - 1) * 95 / 100];
+}
+
+int mvstab_refit_motion_cells(
+    MvstabMotionEdge *edge,
+    const unsigned char *excluded
+) {
+    double model[AFFINE_DIMENSIONS];
+    if (edge == NULL || edge->cell_count < 6 ||
+        edge->cell_count > MVSTAB_MAX_MOTION_CELLS ||
+        fit_motion_cells(edge, excluded, model) != 0) {
+        return 0;
+    }
+    edge->motion.dx = model[0];
+    edge->motion.dy = model[1];
+    edge->motion.scale = (model[2] + model[5]) / 2.0;
+    edge->motion.theta = (model[4] - model[3]) / 2.0;
+    update_refit_reliability(edge, excluded, model);
+    return 1;
+}
+
 static double reference_agreement(
     const MvstabFrame *frame,
     const MvstabCandidate *candidates,
     size_t count,
-    const SimilarityModel *model,
+    const AffineModel *model,
     double threshold
 ) {
     double sum[2][3] = {{0}};
@@ -412,15 +500,60 @@ static double reference_agreement(
         }
         sum[group][0] += candidates[index].base_weight;
         sum[group][1] += candidates[index].base_weight *
-            (candidates[index].dx - model->value[2] * u + model->value[3] * v);
+            (candidates[index].dx - model->value[2] * u - model->value[3] * v);
         sum[group][2] += candidates[index].base_weight *
-            (candidates[index].dy - model->value[3] * u - model->value[2] * v);
+            (candidates[index].dy - model->value[4] * u - model->value[5] * v);
     }
     if (sum[0][0] == 0.0 || sum[1][0] == 0.0) {
         return 1.0;
     }
     return exp(-hypot(sum[0][1] / sum[0][0] - sum[1][1] / sum[1][0],
                       sum[0][2] / sum[0][0] - sum[1][2] / sum[1][0]) / threshold);
+}
+
+static void populate_motion_cells(
+    const MvstabFrame *frame,
+    const MvstabEstimatorConfig *config,
+    const MvstabCandidate *candidates,
+    size_t count,
+    MvstabMotionEdge *edge
+) {
+    double sums[MVSTAB_MAX_MOTION_CELLS][5] = {{0}};
+    unsigned int vector_counts[MVSTAB_MAX_MOTION_CELLS] = {0};
+    size_t grid_count = (size_t)config->grid_columns * config->grid_rows;
+    edge->grid_columns = (uint16_t)config->grid_columns;
+    edge->grid_rows = (uint16_t)config->grid_rows;
+    if (grid_count > MVSTAB_MAX_MOTION_CELLS) {
+        return;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        size_t cell = candidate_grid_cell(frame, config, &candidates[index]);
+        double weight = candidates[index].base_weight;
+        if (!candidates[index].inlier || weight <= 0.0) {
+            continue;
+        }
+        sums[cell][0] += weight;
+        sums[cell][1] += weight * (candidates[index].vector->x - frame->width / 2.0);
+        sums[cell][2] += weight * (candidates[index].vector->y - frame->height / 2.0);
+        sums[cell][3] += weight * candidates[index].dx;
+        sums[cell][4] += weight * candidates[index].dy;
+        ++vector_counts[cell];
+    }
+    for (size_t cell = 0; cell < grid_count; ++cell) {
+        MvstabMotionCell *result;
+        if (sums[cell][0] <= 0.0) {
+            continue;
+        }
+        result = &edge->cells[edge->cell_count++];
+        result->weight = (float)sums[cell][0];
+        result->x = (float)(sums[cell][1] / sums[cell][0]);
+        result->y = (float)(sums[cell][2] / sums[cell][0]);
+        result->dx = (float)(sums[cell][3] / sums[cell][0]);
+        result->dy = (float)(sums[cell][4] / sums[cell][0]);
+        result->vector_count = vector_counts[cell] > UINT16_MAX
+            ? UINT16_MAX : (uint16_t)vector_counts[cell];
+        result->grid_index = (uint16_t)cell;
+    }
 }
 
 MvstabEstimatorConfig mvstab_default_estimator_config(void) {
@@ -452,6 +585,8 @@ static int config_is_valid(
         config->min_spatial_coverage >= 0.0 && config->min_spatial_coverage <= 1.0 &&
         config->grid_columns > 0 && config->grid_rows > 0 &&
         config->grid_columns <= 64 && config->grid_rows <= 64 &&
+        (size_t)config->grid_columns * config->grid_rows <=
+            MVSTAB_MAX_MOTION_CELLS &&
         (config->mode == MVSTAB_MODE_SAFE || config->mode == MVSTAB_MODE_ALL_MVS) &&
         frame->width > 0 && frame->height > 0 &&
         (frame->vector_count == 0 || frame->vectors != NULL);
@@ -465,7 +600,8 @@ static int estimate_candidate_motion(
     int compare_references,
     FrameMotion *motion
 ) {
-    SimilarityModel model = {{0}};
+    AffineModel model = {{0}};
+    double radius = fmax(frame->width, frame->height);
     double threshold = 0.0;
     double total_weight;
     memset(motion, 0, sizeof(*motion));
@@ -474,14 +610,14 @@ static int estimate_candidate_motion(
         return 0;
     }
     total_weight = balance_grid_weights(frame, config, candidates, count);
-    if (robust_similarity_fit(frame, config, candidates, count,
-                              &model, &threshold) != 0) {
+    if (robust_affine_fit(frame, config, candidates, count,
+                          &model, &threshold) != 0) {
         return 0;
     }
     motion->dx = model.value[0];
     motion->dy = model.value[1];
-    motion->scale = model.value[2] / fmax(frame->width, frame->height);
-    motion->theta = model.value[3] / fmax(frame->width, frame->height);
+    motion->scale = (model.value[2] + model.value[5]) / (2.0 * radius);
+    motion->theta = (model.value[4] - model.value[3]) / (2.0 * radius);
     for (size_t index = 0; index < count; ++index) {
         candidates[index].inlier = candidates[index].residual <= threshold;
         candidates[index].weight = candidates[index].base_weight;
@@ -533,6 +669,7 @@ static int add_motion_edge(
     MvstabMotionEdge *edge
 ) {
     int64_t delta = candidates[0].vector->reference_pts_delta;
+    memset(edge, 0, sizeof(*edge));
     if (estimate_candidate_motion(frame, config, candidates, count, 0,
                                   &edge->motion) != 0 || !edge->motion.valid) {
         return 0;
@@ -548,6 +685,7 @@ static int add_motion_edge(
     }
     edge->reference_pts_seconds = frame->pts_seconds +
         candidates[0].vector->reference_delta_seconds;
+    populate_motion_cells(frame, config, candidates, count, edge);
     return isfinite(edge->reference_pts_seconds);
 }
 

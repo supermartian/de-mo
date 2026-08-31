@@ -101,6 +101,8 @@ static int motions_are_continuous(
     double right_dx = frames[right].output.dx;
     double right_dy = frames[right].output.dy;
     double scale;
+    double theta_limit;
+    double zoom_limit;
 
     if (interval_duration(frames, left, &left_dt) &&
         interval_duration(frames, right, &right_dt)) {
@@ -110,7 +112,14 @@ static int motions_are_continuous(
         right_dy /= right_dt;
     }
     scale = fmax(hypot(left_dx, left_dy), hypot(right_dx, right_dy));
-    return hypot(left_dx - right_dx, left_dy - right_dy) <= 2.0 + 0.25 * scale;
+    theta_limit = 0.01 + 0.25 * fmax(fabs(frames[left].output.theta),
+                                     fabs(frames[right].output.theta));
+    zoom_limit = 0.02 + 0.25 * fmax(fabs(frames[left].output.scale),
+                                    fabs(frames[right].output.scale));
+    return hypot(left_dx - right_dx, left_dy - right_dy) <= 2.0 + 0.25 * scale &&
+           fabs(frames[left].output.theta - frames[right].output.theta) <=
+               theta_limit &&
+           fabs(frames[left].output.scale - frames[right].output.scale) <= zoom_limit;
 }
 
 static int interval_duration(
@@ -279,20 +288,26 @@ static void build_precise_timeline(
     }
 }
 
-void mvstab_build_timeline(
+int mvstab_build_timeline(
     MvstabTimelineFrame *frames,
     size_t frame_count,
     MvstabMode mode
 ) {
+    int graph_result;
     size_t index;
 
     if (frames == NULL || frame_count == 0) {
-        return;
+        return 0;
     }
-    if (!has_legacy_valid_motion(frames, frame_count) &&
-        mvstab_build_pose_graph_timeline(frames, frame_count) > 0) {
-        fill_keyframe_motion(frames, frame_count);
-        return;
+    if (!has_legacy_valid_motion(frames, frame_count)) {
+        graph_result = mvstab_build_pose_graph_timeline(frames, frame_count);
+        if (graph_result < 0) {
+            return -1;
+        }
+        if (graph_result > 0) {
+            fill_keyframe_motion(frames, frame_count);
+            return 0;
+        }
     }
     if (has_temporally_normalized_motion(frames, frame_count)) {
         build_precise_timeline(frames, frame_count);
@@ -311,4 +326,5 @@ void mvstab_build_timeline(
         !has_temporally_normalized_motion(frames, frame_count)) {
         fill_keyframe_motion(frames, frame_count);
     }
+    return 0;
 }

@@ -413,6 +413,54 @@ static int test_pose_graph_preserves_disconnected_measurement(void) {
     return 0;
 }
 
+static int test_dense_adjacent_graph_ignores_distant_conflict(void) {
+    MvstabTimelineFrame frames[5];
+    MvstabMotionEdge edges[5];
+    for (int index = 0; index < 5; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_P, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index > 0) {
+            set_edge(&edges[index - 1], index - 1, 2.0);
+            frames[index].edges = &edges[index - 1];
+            frames[index].edge_count = 1;
+        }
+    }
+    set_edge(&edges[4], 0, 100.0);
+    frames[4].edges = &edges[3];
+    frames[4].edge_count = 2;
+    mvstab_build_timeline(frames, 5, MVSTAB_MODE_SAFE);
+    for (int index = 1; index < 5; ++index) {
+        CHECK(fabs(frames[index].output.dx - 2.0) < 1e-7);
+    }
+    return 0;
+}
+
+static int test_clustered_adjacent_edges_keep_distant_coverage(void) {
+    MvstabTimelineFrame frames[40];
+    MvstabMotionEdge edges[39];
+    for (int index = 0; index < 40; ++index) {
+        initialize_frame(&frames[index], MVSTAB_PICTURE_P, 0);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index == 0) {
+            continue;
+        }
+        set_edge(&edges[index - 1], index <= 10 ? index - 1 : 0,
+                 index <= 10 ? 2.0 : 2.0 * index);
+        frames[index].edges = &edges[index - 1];
+        frames[index].edge_count = 1;
+        frames[index].measured.valid = 1;
+        frames[index].measured.temporal_normalized = 1;
+        frames[index].measured.dx = 2.0;
+    }
+    mvstab_build_timeline(frames, 40, MVSTAB_MODE_SAFE);
+    for (int index = 1; index < 40; ++index) {
+        CHECK(fabs(frames[index].output.dx - 2.0) < 1e-6);
+    }
+    return 0;
+}
+
 static int test_pose_graph_defers_to_legacy_timeline(void) {
     MvstabTimelineFrame frames[3];
     MvstabMotionEdge edge;
@@ -427,6 +475,175 @@ static int test_pose_graph_defers_to_legacy_timeline(void) {
     mvstab_build_timeline(frames, 3, MVSTAB_MODE_SAFE);
     CHECK(fabs(frames[1].output.dx - 2.0) < 1e-9);
     CHECK(fabs(frames[2].output.dx - 2.0) < 1e-9);
+    return 0;
+}
+
+static void set_temporal_cell_edge(
+    MvstabMotionEdge *edge,
+    int64_t reference_pts,
+    double background,
+    double interval_scale
+) {
+    set_edge(edge, reference_pts, background + 0.5 * interval_scale);
+    edge->grid_columns = 8;
+    edge->grid_rows = 4;
+    edge->cell_count = 32;
+    for (int index = 0; index < 32; ++index) {
+        MvstabMotionCell *cell = &edge->cells[index];
+        cell->grid_index = (uint16_t)index;
+        cell->x = (float)((index % 8) * 10 - 35);
+        cell->y = (float)((index / 8) * 10 - 15);
+        cell->dx = (float)(index == 10 || index == 11
+            ? background + 6.0 * interval_scale : background);
+        cell->dy = 0.0f;
+        cell->weight = 1.0f;
+        cell->vector_count = 4;
+    }
+}
+
+static void add_cell_rotation(MvstabMotionEdge *edge, double theta) {
+    edge->motion.theta = theta;
+    for (uint16_t index = 0; index < edge->cell_count; ++index) {
+        MvstabMotionCell *cell = &edge->cells[index];
+        cell->dx -= (float)(theta * cell->y);
+        cell->dy += (float)(theta * cell->x);
+    }
+}
+
+static int test_temporal_cells_reject_foreground_across_keyframe(void) {
+    MvstabTimelineFrame frames[17];
+    MvstabMotionEdge edges[15];
+    int edge_index = 0;
+    for (int index = 0; index < 17; ++index) {
+        initialize_frame(&frames[index], index == 8 ? MVSTAB_PICTURE_I
+                                                    : MVSTAB_PICTURE_P,
+                         index == 8);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index == 0 || index == 8) {
+            continue;
+        }
+        set_temporal_cell_edge(&edges[edge_index], index - 1, 2.0, 1.0);
+        frames[index].edges = &edges[edge_index++];
+        frames[index].edge_count = 1;
+    }
+    mvstab_build_timeline(frames, 17, MVSTAB_MODE_SAFE);
+    for (int index = 1; index < 17; ++index) {
+        CHECK(fabs(frames[index].output.dx - 2.0) < 1e-6);
+    }
+    CHECK(edges[0].motion.confidence < 1.0);
+    return 0;
+}
+
+static int test_temporal_history_stops_at_motion_cut(void) {
+    MvstabTimelineFrame frames[17];
+    MvstabMotionEdge edges[15];
+    int edge_index = 0;
+    for (int index = 0; index < 17; ++index) {
+        initialize_frame(&frames[index], index == 8 ? MVSTAB_PICTURE_I
+                                                    : MVSTAB_PICTURE_P,
+                         index == 8);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index == 0 || index == 8) {
+            continue;
+        }
+        set_temporal_cell_edge(&edges[edge_index], index - 1,
+                               index < 8 ? 2.0 : 20.0, 1.0);
+        frames[index].edges = &edges[edge_index++];
+        frames[index].edge_count = 1;
+    }
+    mvstab_build_timeline(frames, 17, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx - 2.5) < 1e-6);
+    CHECK(frames[8].output.dx == 0.0);
+    CHECK(fabs(frames[9].output.dx - 20.5) < 1e-6);
+    return 0;
+}
+
+static int test_temporal_history_stops_at_rotation_cut(void) {
+    MvstabTimelineFrame frames[17];
+    MvstabMotionEdge edges[15];
+    int edge_index = 0;
+    for (int index = 0; index < 17; ++index) {
+        initialize_frame(&frames[index], index == 8 ? MVSTAB_PICTURE_I
+                                                    : MVSTAB_PICTURE_P,
+                         index == 8);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index == 0 || index == 8) {
+            continue;
+        }
+        set_temporal_cell_edge(&edges[edge_index], index - 1, 2.0, 1.0);
+        if (index > 8) {
+            add_cell_rotation(&edges[edge_index], 0.05);
+        }
+        frames[index].edges = &edges[edge_index++];
+        frames[index].edge_count = 1;
+    }
+    mvstab_build_timeline(frames, 17, MVSTAB_MODE_SAFE);
+    CHECK(fabs(frames[1].output.dx - 2.5) < 1e-6);
+    CHECK(frames[8].output.dx == 0.0);
+    CHECK(frames[8].output.theta == 0.0);
+    CHECK(fabs(frames[9].output.dx - 2.5) < 1e-6);
+    CHECK(fabs(frames[9].output.theta - 0.05) < 1e-6);
+    return 0;
+}
+
+static int test_temporal_history_uses_exact_time(void) {
+    MvstabTimelineFrame frames[17];
+    MvstabMotionEdge edges[15];
+    double intervals[17] = {0};
+    int edge_index = 0;
+    for (int index = 0; index < 17; ++index) {
+        double scale = index == 0 ? 0.0 : (index % 2 == 0 ? 2.0 : 1.0);
+        initialize_frame(&frames[index], index == 8 ? MVSTAB_PICTURE_I
+                                                    : MVSTAB_PICTURE_P,
+                         index == 8);
+        intervals[index] = scale;
+        frames[index].pts = index;
+        frames[index].pts_seconds = index == 0 ? 0.0 :
+            frames[index - 1].pts_seconds + scale / 30.0;
+        if (index == 0 || index == 8) {
+            continue;
+        }
+        set_temporal_cell_edge(&edges[edge_index], index - 1,
+                               2.0 * scale, scale);
+        frames[index].edges = &edges[edge_index++];
+        frames[index].edge_count = 1;
+    }
+    mvstab_build_timeline(frames, 17, MVSTAB_MODE_SAFE);
+    for (int index = 1; index < 17; ++index) {
+        CHECK(fabs(frames[index].output.dx - 2.0 * intervals[index]) < 1e-6);
+    }
+    return 0;
+}
+
+static int test_temporal_refit_invalidates_unsupported_edge(void) {
+    MvstabTimelineFrame frames[17];
+    MvstabMotionEdge edges[30];
+    int edge_index = 0;
+    for (int index = 0; index < 17; ++index) {
+        initialize_frame(&frames[index], index == 8 ? MVSTAB_PICTURE_I
+                                                    : MVSTAB_PICTURE_P,
+                         index == 8);
+        frames[index].pts = index;
+        frames[index].pts_seconds = index / 30.0;
+        if (index == 0 || index == 8) {
+            continue;
+        }
+        set_temporal_cell_edge(&edges[edge_index], index - 1, 2.0, 1.0);
+        set_temporal_cell_edge(&edges[edge_index + 1], index - 1, 2.0, 1.0);
+        edges[edge_index + 1].cell_count = 6;
+        frames[index].edges = &edges[edge_index];
+        frames[index].edge_count = 2;
+        edge_index += 2;
+    }
+    mvstab_build_timeline(frames, 17, MVSTAB_MODE_SAFE);
+    CHECK(edges[0].motion.valid);
+    CHECK(!edges[1].motion.valid);
+    for (int index = 1; index < 17; ++index) {
+        CHECK(fabs(frames[index].output.dx - 2.0) < 1e-6);
+    }
     return 0;
 }
 
@@ -470,5 +687,12 @@ int main(void) {
            test_pose_graph_weights_confident_edges() != 0 ||
            test_pose_graph_handles_varied_edge_weights() != 0 ||
            test_pose_graph_preserves_disconnected_measurement() != 0 ||
-           test_pose_graph_defers_to_legacy_timeline() != 0;
+           test_dense_adjacent_graph_ignores_distant_conflict() != 0 ||
+           test_clustered_adjacent_edges_keep_distant_coverage() != 0 ||
+           test_pose_graph_defers_to_legacy_timeline() != 0 ||
+           test_temporal_cells_reject_foreground_across_keyframe() != 0 ||
+           test_temporal_history_stops_at_motion_cut() != 0 ||
+           test_temporal_history_stops_at_rotation_cut() != 0 ||
+           test_temporal_history_uses_exact_time() != 0 ||
+           test_temporal_refit_invalidates_unsupported_edge() != 0;
 }

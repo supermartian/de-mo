@@ -46,10 +46,27 @@ typedef struct {
     int temporal_normalized;
 } FrameMotion;
 
+#define MVSTAB_MAX_MOTION_CELLS 64
+
+/* Compact inlier summary; x/y are centered image coordinates in pixels. */
+typedef struct {
+    float x;
+    float y;
+    float dx;
+    float dy;
+    float weight;
+    uint16_t vector_count;
+    uint16_t grid_index;
+} MvstabMotionCell;
+
 typedef struct {
     int64_t reference_pts;
     double reference_pts_seconds;
     FrameMotion motion;
+    MvstabMotionCell cells[MVSTAB_MAX_MOTION_CELLS];
+    size_t cell_count;
+    uint16_t grid_columns;
+    uint16_t grid_rows;
 } MvstabMotionEdge;
 
 const char *mvstab_picture_type_name(MvstabPictureType picture_type);

@@ -733,7 +733,11 @@ static int write_analysis(
     AnalysisPublication stats = {.path = options->stats_path};
     int result = -1;
 
-    mvstab_build_timeline(state->frames, state->frame_count, options->estimator.mode);
+    if (mvstab_build_timeline(state->frames, state->frame_count,
+                              options->estimator.mode) != 0) {
+        snprintf(error, error_size, "temporal motion analysis failed");
+        goto cleanup;
+    }
     if (reserve_analysis_temp(options->output_path, &transform_temp,
                               error, error_size) != 0 ||
         mvstab_write_transform_file(transform_temp, state->frames,
