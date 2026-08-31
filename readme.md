@@ -30,9 +30,9 @@ The repository includes:
 - an FFmpeg patch that exports exact H.264 references and adds syntax-only
   motion decoding;
 - exact reference-time normalization for P and B pictures;
-- robust, spatially balanced similarity fits per exact reference;
+- robust, spatially balanced affine fits per exact reference;
+- 31-frame block-grid histories that reject compact persistent foreground;
 - a diagonally preconditioned, confidence-weighted exact-reference pose graph;
-- an optional low-resolution luma refinement for vid.stab-class quality;
 - CSV/JSON diagnostics and vid.stab-compatible transforms;
 - comparison, plotting, unit, and encoded end-to-end tests.
 
@@ -132,35 +132,31 @@ Always set `relative=1`. The transform contains inverse translation and the
 vid.stab-calibrated rotation sign. Scale is fitted as a nuisance term and is
 reported in stats, but the transform's zoom field is currently zero.
 
-### Optional quality refinement
+### Long-horizon pure-MV analysis
 
-Motion vectors sometimes contain no recoverable camera direction: an encoder
-may choose intra blocks, zero skip, or predictions owned by a moving object.
-For those cases, the optional refinement decodes reconstructed luma, measures
-translation at 1/2, 1/4, and 1/8 resolution, and blends a robust centered
-similarity model with the codec result. It requires NumPy and OpenCV:
+Each exact-reference fit retains a compact 8×4 grid of local block motion.
+Across a 31-frame window, mvstab follows residual motion through neighboring
+grid cells. A region is treated as foreground only when its displacement is
+large, directionally consistent for at least nine observations, and occupies
+no more than one quarter of the supported cells. The reference edge is then
+refit without that region. Rates use exact reference timestamps, so variable
+frame duration does not turn equal physical motion into unequal evidence.
 
-```sh
-python3 -m pip install numpy opencv-python
-
-python3 tools/refine_motion.py input.mp4 motion.trf -o refined.trf
-
-ffmpeg -i input.mp4 \
-  -vf "vidstabtransform=input=refined.trf:relative=1:smoothing=30:optzoom=1" \
-  -c:v libx264 -crf 18 -c:a copy stabilized.mp4
-```
-
-The baseline transform must have exactly one row per decoded video frame. The
-refiner writes its output atomically and refuses frame-count mismatches. It is
-a quality mode, not a metadata-only mode: it performs an additional pixel
-decode and therefore gives up the pure-MV detector's speed and memory
-advantage.
+The history crosses isolated keyframes because an I-picture is treated as a
+missing observation, not an automatic cut. Continuity gates still prevent a
+missing keyframe transform from being filled when motion on its two sides
+disagrees; timestamp gaps also reset the history. No luma, chroma,
+reconstructed frame, optical flow, or feature tracking is used by
+`mvstab analyze`.
 
 With exact metadata, safe mode uses both P and B pictures, fits each exact
 reference separately, and solves their constraints as a confidence-weighted
-camera pose graph. Disconnected reference components are independently
-anchored, and only continuous keyframe gaps are repaired. With stock
-FFmpeg, safe mode uses past-reference P-picture anchors.
+camera pose graph. When adjacent exact edges cover the sequence densely, they
+form the graph; long uncovered regions can admit longer coded edges only when
+the combined frame estimate also passes confidence checks. Sparse inputs fall
+back to all valid references with span-scaled weights. Disconnected components
+are independently anchored, and only continuous keyframe gaps are repaired.
+With stock FFmpeg, safe mode uses past-reference P-picture anchors.
 `--mode all-mvs` enables direction-only future-reference use on the fallback
 path and should be treated as experimental.
 
@@ -227,7 +223,7 @@ The supplied clip was already H.264 Main profile, 720×480 at 29.97 fps, with
 On the same host:
 
 - patched metadata-only H.264 decode: 3.28 s, versus 12.12 s full decode;
-- complete pose-graph `mvstab analyze`: 7.19 s and about 18 MB RSS;
+- complete temporal `mvstab analyze`: 7.77 s and about 67 MB RSS;
 - `vidstabdetect`: 12.71 s wall, 246.57 CPU seconds, about 129 MB RSS;
 - full-decode and metadata-only exports matched byte-for-byte for all frames;
 - exact metadata was present on all 20,715,192 exported prediction records;
@@ -235,18 +231,19 @@ On the same host:
   on 7 frames, while the exact-timed estimator measured nonzero motion on
   11,088 frames;
 - after rendering each transform and measuring the remaining motion with the
-  same detector settings and no-smoothing debug pass, metadata-only mvstab
-  reaches 4.513 pixels median translation (10.187 RMS); optional luma
-  refinement reaches 2.319 pixels (5.694 RMS), while vid.stab reaches 2.283
-  pixels (5.651 RMS);
-- refined rotation reaches 0.525 degrees RMS versus vid.stab's 0.573 degrees
-  RMS; its 95th percentile is 0.928 degrees versus 0.946 degrees.
+  same detector settings and no-smoothing debug pass, the previous pure-MV
+  baseline reaches 4.513 pixels median translation and 10.187 RMS;
+- long-horizon mvstab reaches 4.211 pixels median, 9.881 RMS, and 19.739 at
+  p95, while vid.stab reaches 2.283 pixels median, 5.651 RMS, and 8.014 at p95;
+- long-horizon rotation reaches 0.717 degrees RMS versus the old pure-MV
+  baseline's 0.751 degrees and vid.stab's 0.573 degrees.
 
-The comparison is intentionally candid. Pure codec metadata is much cheaper,
-but encoder decisions are a sparse proxy for camera motion. The optional
-refinement closes the full-clip translation-RMS gap to 0.8% and improves
-rotation RMS, at the cost of touching reconstructed pixels. Vid.stab still has
-the better translation tail: 8.013 pixels at p95 versus 8.799 pixels.
+The comparison is intentionally candid. Long-horizon block evidence improves
+the previous pure-MV result without touching reconstructed pixels, but it does
+not close the observability gap: vid.stab still has much better translation
+tails because it measures image content directly.
+
+![Full-clip mvstab and vid.stab motion plot](assets/mvstab-motion-plot.png)
 
 ## Supported codecs
 
@@ -269,9 +266,8 @@ field; hardware APIs often do not expose it at all.
 - Damaged-stream error concealment is disabled in metadata-only mode.
 - Codec MVs are encoder decisions and can be weak in flat regions or dominated
   by moving foreground objects.
-- Optional refinement requires a software pixel decode, NumPy, and OpenCV.
-- The global similarity model does not handle parallax, perspective, mesh
-  motion, or rolling shutter.
+- The affine nuisance fit still emits one global similarity transform; it does
+  not correct parallax, perspective, mesh motion, or rolling shutter.
 - Production scene-cut segmentation and resetting vid.stab smoothing at cuts
   remain future work.
 - Rendering still requires one normal pixel decode and transform pass.

@@ -13,12 +13,6 @@ performs trajectory smoothing, cropping, interpolation, rendering, encoding,
 and muxing. Pixel processing is therefore deferred to the one rendering pass
 where it is unavoidable.
 
-An optional quality refiner is deliberately outside that metadata-only
-contract. It consumes the syntax-derived transform plus reconstructed
-low-resolution luma and targets cases where the bitstream contains no usable
-motion direction. The default analyzer remains syntax-only; the refiner is an
-explicit second command.
-
 ```text
 MP4/MOV H.264 packets
         |
@@ -36,7 +30,12 @@ exact prediction partitions + final MVs + exact references
 group vectors by exact reference picture
         |
         v
-robust spatially balanced similarity fit per reference edge
+robust spatially balanced affine fit per reference edge
+        |
+        v
+31-frame block-grid persistence analysis
+  - compact foreground rejection
+  - keyframes as missing observations
         |
         v
 confidence-weighted pose graph
@@ -265,20 +264,23 @@ estimator.
 
 Reliability evidence cannot manufacture a missing displacement. A mostly
 intra-coded frame or a zero-skip field can say “the MV estimate is
-unobservable,” but it contains no camera-motion direction to recover. That is
-the boundary that motivates the optional luma path.
+unobservable,” but it contains no camera-motion direction to recover. The
+pure-MV estimator reports or interpolates such gaps conservatively rather than
+inventing observations.
 
-The estimator fits a 2D similarity field around the image center:
+The estimator fits a 2D affine field around the image center:
 
 ```text
-dx(x,y) = tx + scale*x - theta*y
-dy(x,y) = ty + theta*x + scale*y
+dx(x,y) = tx + a*x + b*y
+dy(x,y) = ty + c*x + d*y
+scale   = (a + d) / 2
+theta   = (c - b) / 2
 ```
 
-`tx`, `ty`, and `theta` describe the global image motion. `scale` absorbs
-forward-driving expansion and other radial motion so it does not contaminate
-translation/rotation; scale is reported but is not currently sent to
-vid.stab.
+`tx`, `ty`, and `theta` describe the projected global similarity motion.
+Independent affine terms absorb expansion, unequal axis stretch, and shear so
+those effects contaminate translation and rotation less. Scale is reported but
+is not currently sent to vid.stab.
 
 Each reference-edge fit uses:
 
@@ -295,6 +297,32 @@ Each reference-edge fit uses:
 At least half-image support in both axes and support on opposing image halves
 is required. Exact-timed B and P pictures can both contribute constraints.
 
+### Block-grid sequence model
+
+After the robust edge fit, inlier vectors are summarized in an 8×4 image grid.
+Each occupied cell retains its weighted center, displacement, support, and
+exact reference edge. The raw per-block array can then be released; the fixed
+summary bounds memory independently of partition count.
+
+For each display frame, the nearest exact-reference edge supplies a local
+motion-rate residual after subtracting the fitted camera field. Exact reference
+timestamps normalize that residual to one nominal output interval. The
+analyzer searches the same and neighboring grid cells over 15 frames on either
+side.
+A residual is classified as persistent foreground only when it is at least
+1.5 pixels per frame, agrees with at least eight other observations, leaves at
+least six background cells, and occupies no more than one quarter of the
+supported grid. All exact edges for that frame are refit without the marked
+cells.
+
+This is a foreground classifier, not detector-side trajectory smoothing. A
+genuine camera impulse affects the field broadly and is retained. An isolated
+I-picture contributes no block observation, so histories can span periodic GOP
+boundaries. At a keyframe, incompatible camera rates on its two sides start a
+new history segment; discontinuous PTS does the same. Pose-graph components
+remain separately anchored, and the existing motion-continuity gate refuses
+keyframe interpolation at a detected break.
+
 ### Exact-reference pose graph
 
 For an exact edge from reference picture `r` to current picture `i`, the raw
@@ -306,11 +334,15 @@ pose[i] - pose[r] ~= edge[r -> i]
 ```
 
 The four pose coordinates are translation X/Y, rotation, and fractional scale
-under a small-motion approximation. A sparse least-squares solve weights every
-edge by its fit confidence and spatial coverage. The detector does not apply a
-second temporal smoothing objective: `vidstabtransform` owns that policy during
-rendering. A diagonal preconditioner keeps the graph solve stable when valid
-edge weights span several orders of magnitude. Reference-connected components
+under a small-motion approximation. A sparse least-squares solve weights each
+edge by fit confidence, spatial coverage, and inverse squared temporal span.
+When adjacent exact edges support at least one quarter of the frames, those
+local constraints enter the graph. A run longer than the temporal window can
+admit longer edges when its combined frame estimate is also valid; globally
+sparse inputs keep all valid graph edges. Longer references have greater codec
+model uncertainty. The detector does not apply a second temporal smoothing
+objective: `vidstabtransform` owns that policy during rendering. A diagonal
+preconditioner keeps the graph solve stable. Reference-connected components
 are solved and anchored separately, so the optimizer cannot pull one GOP or
 scene through an unrelated component. Adjacent pose differences become the
 relative output rows.
@@ -319,40 +351,6 @@ If exact edge metadata is absent, the previous timestamp-normalized timeline is
 used unchanged. Its gaps of at most three frames are interpolated only when
 reliable models on both sides have continuous velocity. A continuity-gated
 repair fills isolated periodic keyframes after a graph solve.
-
-## Optional low-resolution luma refinement
-
-`tools/refine_motion.py` decodes each frame once and builds luma images at
-1/2, 1/4, and 1/8 resolution. For scale `s`, phase correlation returns shift
-`p_s` and response `r_s`. The inverse translation proposal is:
-
-```text
-phase = -0.375 * sum_s(clamp(r_s, 0, 1) * s * p_s)
-```
-
-At 1/4 resolution, Shi-Tomasi points and pyramidal Lucas-Kanade tracks feed a
-RANSAC similarity fit. Translation is evaluated at frame center rather than at
-coordinate origin. For affine matrix `[A | t]` and center `c`:
-
-```text
-flow_center = (A - I) * c + t
-```
-
-This distinction matters whenever rotation is present: the matrix's raw
-translation column describes origin motion, not global frame-center motion.
-The fit is accepted only with at least eight tracks, 35% RANSAC inliers, and
-at most 128 pixels of center displacement. An accepted model is blended with
-the phase proposal and codec angle:
-
-```text
-translation = 0.60 * phase - 0.32 * flow_center
-alpha       = 0.50 * codec_alpha + 0.40 * flow_alpha
-```
-
-Otherwise the phase proposal and codec angle are retained. The three phase
-scales reduce wrap and texture sensitivity; sparse-flow consensus supplies
-rotation and a second, independent translation observation. Output publication
-is atomic, and a frame-count mismatch is a hard error.
 
 ## vid.stab output convention
 
@@ -379,9 +377,10 @@ reduces residual rotation.
 ## Validation
 
 The normal suite covers vector normalization, exact past/future duration
-normalization, similarity recovery, outliers, reference disagreement, spatial
-coverage, precise and legacy timelines, writers, comparison and luma-refinement
-tools, and an encoded H.264 end-to-end stabilization.
+normalization, affine-to-similarity recovery, outliers, reference disagreement,
+spatial coverage, long-horizon foreground rejection across a keyframe, precise
+and legacy timelines, writers, comparison tools, and an encoded H.264
+end-to-end stabilization.
 
 Patch validation additionally covers:
 
@@ -398,22 +397,21 @@ Patch validation additionally covers:
 
 On the 720×480, 379.35-second driving clip, the patched decoder processed all
 11,369 frames in 3.28 seconds versus 12.12 seconds for full H.264 decode in the
-same single-process probe (3.7× faster). Full pose-graph `mvstab analyze`,
-including both diagnostic fitting and CSV output, took 7.19 seconds and about
-18 MB RSS. The earlier
+same single-process probe (3.7× faster). Full temporal `mvstab analyze`,
+including compact cell histories and CSV output, took 7.77 seconds and about
+67 MB RSS. The earlier
 pixel-domain `vidstabdetect` run took 12.71 seconds wall time, 246.57 CPU
 seconds, and about 129 MB RSS on the same host.
 
 The estimators are not expected to agree frame-for-frame: vid.stab measures
 selected pixel patches while metadata-only mvstab observes encoder prediction.
 Under one fair residual protocol (`shakiness=5`, `accuracy=15`, `stepsize=6`,
-and `mincontrast=0.25`), the checked-in metadata-only analyzer reaches 4.513
-pixels median residual translation and 10.187 RMS. The optional luma refiner
-reaches 2.319 pixels median and 5.694 RMS. Pixel-domain vid.stab reaches 2.283
-pixels median and 5.651 RMS. Refined rotation is better on the same output:
-0.525 degrees RMS and 0.928 degrees p95 versus vid.stab's 0.573 degrees RMS and
-0.946 degrees p95. Translation p95 remains the main gap at 8.799 versus 8.013
-pixels.
+and `mincontrast=0.25`), the previous metadata-only baseline reaches 4.513
+pixels median residual translation and 10.187 RMS. Long-horizon mvstab reaches
+4.211 pixels median, 9.881 RMS, and 19.739 p95. Pixel-domain vid.stab reaches
+2.283 pixels median, 5.651 RMS, and 8.014 p95. Long-horizon rotation improves
+from the previous pure-MV baseline's 0.751 degrees RMS to 0.717 degrees;
+vid.stab reaches 0.573 degrees RMS.
 
 ## Known boundaries and next work
 
@@ -423,9 +421,10 @@ pixels.
   mode. Callers must inspect decode-error flags and decide whether to fall back.
 - Encoder motion can be unreliable in flat areas, during flashes/cuts, and for
   independently moving foreground objects.
-- Optional refinement requires a full software pixel decode, NumPy, and
-  OpenCV; it is not a metadata-only acceleration path.
-- Similarity motion does not model perspective, rolling shutter, or parallax.
+- The emitted global similarity transform does not correct perspective,
+  rolling shutter, mesh motion, or parallax.
+- `MvstabMotionEdge` gained fixed cell summaries in the 0.x API; applications
+  embedding the public struct must rebuild and no 0.x binary ABI is promised.
 - Scene-cut segmentation and resetting external vid.stab smoothing remain
   necessary for production-quality long-form rendering.
 - The exact public flag layout is H.264-specific and patch-specific; an
