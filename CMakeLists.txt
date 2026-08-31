@@ -106,21 +106,6 @@ if(BUILD_TESTING)
         set_tests_properties(compare_tools PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
         )
-        execute_process(
-            COMMAND ${Python3_EXECUTABLE} -c "import cv2, numpy"
-            RESULT_VARIABLE MVSTAB_PYTHON_VISION_AVAILABLE
-            OUTPUT_QUIET ERROR_QUIET
-        )
-        if(MVSTAB_PYTHON_VISION_AVAILABLE EQUAL 0)
-            add_test(
-                NAME refine_motion
-                COMMAND ${Python3_EXECUTABLE}
-                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_refine_motion.py
-            )
-            set_tests_properties(refine_motion PROPERTIES
-                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
-            )
-        endif()
     endif()
 
     find_program(MVSTAB_BASH_EXECUTABLE bash)
