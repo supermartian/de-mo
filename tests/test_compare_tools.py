@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from compare_vidstab import (  # noqa: E402
     compare, percentile, read_codec_csv, spectral_band_energy)
+from summarize_motion import summarize_motion  # noqa: E402
 
 
 class CompareToolsTest(unittest.TestCase):
@@ -92,6 +93,23 @@ class CompareToolsTest(unittest.TestCase):
                 "frame_index,dx,dy,confidence,residual_median,pts_seconds\n"
                 "0,1,0,1,0,nan\n", encoding="utf-8")
             self.assertIsNone(read_codec_csv(path)[0]["pts"])
+
+    def test_residual_summary_uses_magnitude_and_degree_units(self):
+        records = [
+            {"frame": 0, "dx": 3.0, "dy": 0.0, "theta": math.pi / 180.0},
+            {"frame": 1, "dx": 0.0, "dy": 4.0,
+             "theta": 2.0 * math.pi / 180.0},
+        ]
+        result = summarize_motion(records)
+        self.assertEqual(result["frames"], 2)
+        self.assertEqual(result["translation_median_px"], 3.5)
+        self.assertAlmostEqual(result["translation_rms_px"], math.sqrt(12.5))
+        self.assertEqual(result["translation_p95_px"], 4.0)
+        self.assertAlmostEqual(result["rotation_rms_degrees"], math.sqrt(2.5))
+
+    def test_residual_summary_rejects_empty_input(self):
+        with self.assertRaisesRegex(ValueError, "contains no records"):
+            summarize_motion([])
 
 
 if __name__ == "__main__":
