@@ -32,6 +32,7 @@ The repository includes:
 - exact reference-time normalization for P and B pictures;
 - robust, spatially balanced similarity fits per exact reference;
 - a diagonally preconditioned, confidence-weighted exact-reference pose graph;
+- an optional low-resolution luma refinement for vid.stab-class quality;
 - CSV/JSON diagnostics and vid.stab-compatible transforms;
 - comparison, plotting, unit, and encoded end-to-end tests.
 
@@ -131,6 +132,30 @@ Always set `relative=1`. The transform contains inverse translation and the
 vid.stab-calibrated rotation sign. Scale is fitted as a nuisance term and is
 reported in stats, but the transform's zoom field is currently zero.
 
+### Optional quality refinement
+
+Motion vectors sometimes contain no recoverable camera direction: an encoder
+may choose intra blocks, zero skip, or predictions owned by a moving object.
+For those cases, the optional refinement decodes reconstructed luma, measures
+translation at 1/2, 1/4, and 1/8 resolution, and blends a robust centered
+similarity model with the codec result. It requires NumPy and OpenCV:
+
+```sh
+python3 -m pip install numpy opencv-python
+
+python3 tools/refine_motion.py input.mp4 motion.trf -o refined.trf
+
+ffmpeg -i input.mp4 \
+  -vf "vidstabtransform=input=refined.trf:relative=1:smoothing=30:optzoom=1" \
+  -c:v libx264 -crf 18 -c:a copy stabilized.mp4
+```
+
+The baseline transform must have exactly one row per decoded video frame. The
+refiner writes its output atomically and refuses frame-count mismatches. It is
+a quality mode, not a metadata-only mode: it performs an additional pixel
+decode and therefore gives up the pure-MV detector's speed and memory
+advantage.
+
 With exact metadata, safe mode uses both P and B pictures, fits each exact
 reference separately, and solves their constraints as a confidence-weighted
 camera pose graph. Disconnected reference components are independently
@@ -210,18 +235,18 @@ On the same host:
   on 7 frames, while the exact-timed estimator measured nonzero motion on
   11,088 frames;
 - after rendering each transform and measuring the remaining motion with the
-  same no-smoothing vid.stab pass, the earlier per-frame mvstab estimator
-  reduced median translation from 4.892 to 4.572 pixels; the exact-reference
-  pose graph without detector-side acceleration smoothing reaches 2.368 pixels
-  (6.806 RMS) and lowers median rotation from 0.00421 to 0.00263 radians;
-  vid.stab's pixel-domain result reaches 2.283 pixels (5.651 RMS) and 0.00379
-  radians.
+  same detector settings and no-smoothing debug pass, metadata-only mvstab
+  reaches 4.513 pixels median translation (10.187 RMS); optional luma
+  refinement reaches 2.319 pixels (5.694 RMS), while vid.stab reaches 2.283
+  pixels (5.651 RMS);
+- refined rotation reaches 0.525 degrees RMS versus vid.stab's 0.573 degrees
+  RMS; its 95th percentile is 0.928 degrees versus 0.946 degrees.
 
-The last comparison is intentionally candid: exact bitstream timing makes the
-codec estimator useful and much cheaper. Preserving multi-reference constraints
-gets typical translation close to vid.stab and improves median rotation, though
-vid.stab retains a translation-RMS advantage on this clip. Encoder decisions
-are a sparse proxy for camera motion, not optical-flow ground truth.
+The comparison is intentionally candid. Pure codec metadata is much cheaper,
+but encoder decisions are a sparse proxy for camera motion. The optional
+refinement closes the full-clip translation-RMS gap to 0.8% and improves
+rotation RMS, at the cost of touching reconstructed pixels. Vid.stab still has
+the better translation tail: 8.013 pixels at p95 versus 8.799 pixels.
 
 ## Supported codecs
 
@@ -244,6 +269,7 @@ field; hardware APIs often do not expose it at all.
 - Damaged-stream error concealment is disabled in metadata-only mode.
 - Codec MVs are encoder decisions and can be weak in flat regions or dominated
   by moving foreground objects.
+- Optional refinement requires a software pixel decode, NumPy, and OpenCV.
 - The global similarity model does not handle parallax, perspective, mesh
   motion, or rolling shutter.
 - Production scene-cut segmentation and resetting vid.stab smoothing at cuts
